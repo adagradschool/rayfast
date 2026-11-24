@@ -76,3 +76,7 @@ latency to stderr), `RF_SNAP=/path/x` (`kill -USR2` renders the window with the 
 `tests/bench.sh`, `tests/breakdown.sh` and `tests/h2h.sh` drive QuickKey's ScreenCaptureKit benchmark (built from
 `QuickKey/tests/RenderLatency.m` plus `tests/RenderLatency.patch`; set `$BENCH` to the binary).
 `tests/e2e*.sh` type into the real UI with synthetic keystrokes, so run them with nothing important frontmost.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
