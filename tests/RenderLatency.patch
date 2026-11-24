@@ -1,0 +1,41 @@
+--- RenderLatency.m
++++ RenderLatency.m (rayfast bench overrides: BENCH_KEY, BENCH_ABS, alpha-aware visibility)
+@@ -13,7 +13,7 @@
+ static NSDictionary *visiblePanel(NSString *owner) {
+     NSArray *windows=CFBridgingRelease(CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly,0));
+     for (NSDictionary *w in windows)
+-        if ([w[@"kCGWindowOwnerName"] isEqual:owner] && [w[@"kCGWindowBounds"][@"Width"] intValue]==750) return w;
++        if ([w[@"kCGWindowOwnerName"] isEqual:owner] && [w[@"kCGWindowBounds"][@"Width"] intValue]==750 && [w[@"kCGWindowAlpha"] doubleValue] > 0.01) return w;   // a transparent (parked) window is not visible
+     return nil;
+ }
+ static void press(pid_t pid, CGKeyCode key, CGEventFlags flags) {
+@@ -61,9 +61,11 @@
+     int count=argc>1 ? atoi(argv[1]) : 3; double pause=argc>2 ? atof(argv[2]) : .25;
+     NSString *owner=argc>3 ? @(argv[3]) : @"QuickKey";
+     BOOL rayfast=[owner isEqual:@"rayfast"];
+-    if (![owner isEqual:@"QuickKey"] && ![owner isEqual:@"Raycast"] && !rayfast) return 2;
++    if (![owner isEqual:@"QuickKey"] && ![owner isEqual:@"Raycast"] && !rayfast && !getenv("BENCH_KEY")) return 2;
+     CGEventFlags shortcut=[owner isEqual:@"Raycast"] ? kCGEventFlagMaskCommand : kCGEventFlagMaskAlternate;
+     if (rayfast) shortcut|=kCGEventFlagMaskControl;
++    CGKeyCode key=49;
++    if (getenv("BENCH_KEY")) { key=(CGKeyCode)atoi(getenv("BENCH_KEY")); shortcut=kCGEventFlagMaskCommand|kCGEventFlagMaskAlternate|kCGEventFlagMaskControl|kCGEventFlagMaskShift; }   // hyper+key
+     // Comparison runs leave time to distinguish content loading from steady state.
+     useconds_t observation=argc>4 ? (useconds_t)(atof(argv[4])*1e6) : 600000;
+     __block SCShareableContent *content=nil;
+@@ -107,7 +109,7 @@
+             before=@{@"image":background};
+         }
+         uint64_t start=mach_absolute_time();
+-        press(0,49,shortcut);
++        press(0,key,shortcut);
+         usleep(observation); NSDictionary *window=visiblePanel(owner);
+         __block NSArray *samples; dispatch_sync(queue,^{capture.recording=NO; samples=[capture.frames copy];});
+         if(!window || !samples.count || !before) {
+@@ -131,6 +133,7 @@
+             if(diff>.002) settled=-1;
+             else if(settled<0) settled=ticksMS(time-start);
+         }
++        if (getenv("BENCH_ABS")) printf("start=%llu\n", start);
+         if(baseline>.05 && settled>=0) { printf("trial %d: %.1f ms to final pixels (recognizable %.1f ms, %lu frames, baseline difference %.1f%%)\n",n+1,settled,recognizable,(unsigned long)samples.count,baseline*100); good++; }
+         else fprintf(stderr,"Unusable pixel sample (baseline %.3f, final %.1f)\n",baseline,settled);
+         press([window[@"kCGWindowOwnerPID"] intValue],53,0); usleep((useconds_t)(pause*1e6));
