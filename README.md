@@ -15,7 +15,7 @@ make uninstall
 | | |
 |---|---|
 | `⌘Space` | toggle the launcher (change `toggle` in the config) |
-| type | fuzzy app search (`vsc` → Visual Studio Code), ranked by how often you open things |
+| type | fuzzy app search (`vsc` → Visual Studio Code), ranked by match quality plus how often and how recently you open each app (launcher or hotkey; opens count half as much every 14 days) |
 | `↩` | open app / copy answer |
 | `⌘K` on an app | record a global hotkey for it (`⌫` removes, `esc` cancels). Pressing an app's hotkey while it's frontmost hides it |
 | `⌘,` | edit `~/.config/rayfast/config` |

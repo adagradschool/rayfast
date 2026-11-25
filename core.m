@@ -133,6 +133,7 @@ void rfOpenApp(NSString *path, BOOL fromHotkey) {
         if (same) { ShowHideProcess(&psn, false); return; }
     }
     LSOpenCFURLRef((__bridge CFURLRef)[NSURL fileURLWithPath:path], NULL);
+    uiNoteOpen(path);   // hotkey hides of the frontmost app (above) don't count
 }
 
 #pragma mark - respawn + entry

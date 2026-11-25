@@ -310,7 +310,7 @@ static NSString *localCurrency(void) {
 #pragma mark - results
 
 enum { K_HEADER, K_APP, K_CALC, K_INFO, K_ACTION, K_FILE };
-@interface App : NSObject { @public NSString *name, *path; char lname[128]; int uses; id icon; /* CGImageRef */ BOOL file, dir; }
+@interface App : NSObject { @public NSString *name, *path; char lname[128]; double uses; id icon; /* CGImageRef */ BOOL file, dir; }
 @end
 @implementation App
 @end
@@ -1125,6 +1125,16 @@ static int scoreMatch(const char *name, const char *q) {
 
 #pragma mark apps
 
+// Usage file: app path -> [score, last opened (CFAbsoluteTime)]. Every open adds 1 to the score, and the score halves
+// every 14 days, so what you open now outranks what you opened a lot last month. (Old files held plain counts.)
+static const double USAGE_HALF_LIFE = 14 * 86400;
+static NSDictionary *loadUsage(void) { return [NSDictionary dictionaryWithContentsOfFile:usagePath()] ?: @{}; }
+static double usageScore(id rec, double now) {
+    if ([rec isKindOfClass:NSNumber.class]) return [rec doubleValue];   // legacy count: treat as opened just now
+    if (![rec isKindOfClass:NSArray.class] || [rec count] < 2) return 0;
+    return [rec[0] doubleValue] * exp2(-MAX(0, now - [rec[1] doubleValue]) / USAGE_HALF_LIFE);
+}
+
 static void scanDir(NSMutableArray *out, NSMutableSet *seen, const char *dir, int depth) {
     DIR *d = opendir(dir);
     if (!d) return;
@@ -1156,20 +1166,15 @@ static void scanDir(NSMutableArray *out, NSMutableSet *seen, const char *dir, in
     if (![seen containsObject:@"Finder"]) {
         App *a = [App new]; a->name = @"Finder"; a->path = @"/System/Library/CoreServices/Finder.app"; strcpy(a->lname, "finder"); [out addObject:a];
     }
-    NSDictionary *usage = [NSDictionary dictionaryWithContentsOfFile:usagePath()];
+    NSDictionary *usage = loadUsage();
+    double now = CFAbsoluteTimeGetCurrent();
     for (NSUInteger i = 0; i < out.count; i++) {
         App *a = out[i], *o = old[a->path];
         if (o) { out[i] = o; continue; }
-        a->uses = [usage[a->path] intValue];
+        a->uses = usageScore(usage[a->path], now);
     }
     apps = out;
     lastScan = CFAbsoluteTimeGetCurrent();
-}
-- (void)bumpUsage:(App *)a {
-    a->uses++;
-    NSMutableDictionary *u = [NSMutableDictionary dictionary];
-    for (App *x in apps) if (x->uses) u[x->path] = @(x->uses);
-    [u writeToFile:usagePath() atomically:YES];
 }
 
 #pragma mark lifecycle
@@ -1551,7 +1556,7 @@ static int fileNameRank(NSString *name, NSArray<NSString *> *words) {
     if (sel < 0 || sel >= (int)rows.count) return;
     Item *it = rows[sel];
     switch (it->kind) {
-    case K_APP: { App *a = it->app; [self bumpUsage:a]; [self hide]; rfOpenApp(a->path, NO); break; }
+    case K_APP: { App *a = it->app; [self hide]; rfOpenApp(a->path, NO); break; }
     case K_CALC:
         [NSPasteboard.generalPasteboard clearContents];
         [NSPasteboard.generalPasteboard setString:it->copy ?: it->title forType:NSPasteboardTypeString];
@@ -1647,6 +1652,18 @@ void uiRun(void) {
 }
 void uiToggle(void) { [gR toggleLauncher]; }
 void uiSnapshot(void) { [gR snapshot]; }
+void uiNoteOpen(NSString *path) {
+    double now = CFAbsoluteTimeGetCurrent();
+    NSMutableDictionary *u = [NSMutableDictionary dictionary];
+    [loadUsage() enumerateKeysAndObjectsUsingBlock:^(NSString *k, id rec, BOOL *stop) {
+        double s = usageScore(rec, now);
+        if (s >= 0.05) u[k] = @[@(s), @(now)];   // re-based to now; forgotten after ~2 months unused
+    }];
+    double s = usageScore(u[path], now) + 1;
+    u[path] = @[@(s), @(now)];
+    [u writeToFile:usagePath() atomically:YES];
+    if (gR) for (App *a in gR->apps) if ([a->path isEqual:path]) a->uses = s;
+}
 int uiEval(int argc, const char **argv) {   // rayfast --eval "5 km to mi" ...
     loadRates();
     if (ratesStale()) fetchRates(YES);

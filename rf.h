@@ -27,4 +27,5 @@ void rfRespawn(void);
 void uiRun(void);       // starts AppKit, builds and pre-shows the hidden window, runs the event loop; never returns
 void uiToggle(void);
 void uiSnapshot(void);
+void uiNoteOpen(NSString *path);   // count an app launch (launcher or hotkey) toward its ranking
 int uiEval(int argc, const char **argv);
