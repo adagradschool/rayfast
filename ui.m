@@ -422,61 +422,147 @@ static Item *mathQuery(NSString *q) {
 
 #pragma mark - timezone query
 
-static NSTimeZone *tzLookup(NSString *s) {
-    s = trim(s);
-    if (!s.length) return nil;
-    if ([s isEqual:@"local"] || [s isEqual:@"here"] || [s isEqual:@"me"]) return NSTimeZone.localTimeZone;
-    static NSDictionary *map;
-    if (!map) map = @{
-        @"pst": @"America/Los_Angeles", @"pdt": @"America/Los_Angeles", @"pt": @"America/Los_Angeles", @"pacific": @"America/Los_Angeles",
-        @"est": @"America/New_York", @"edt": @"America/New_York", @"et": @"America/New_York", @"eastern": @"America/New_York",
-        @"cst": @"America/Chicago", @"cdt": @"America/Chicago", @"ct": @"America/Chicago", @"central": @"America/Chicago",
-        @"mst": @"America/Denver", @"mdt": @"America/Denver", @"mt": @"America/Denver", @"mountain": @"America/Denver",
-        @"akst": @"America/Anchorage", @"hst": @"Pacific/Honolulu", @"ist": @"Asia/Kolkata", @"gmt": @"GMT", @"utc": @"UTC", @"z": @"UTC",
-        @"bst": @"Europe/London", @"wet": @"Europe/Lisbon", @"cet": @"Europe/Paris", @"cest": @"Europe/Paris", @"eet": @"Europe/Athens",
-        @"msk": @"Europe/Moscow", @"gst": @"Asia/Dubai", @"pkt": @"Asia/Karachi", @"npt": @"Asia/Kathmandu", @"ict": @"Asia/Bangkok",
-        @"wib": @"Asia/Jakarta", @"sgt": @"Asia/Singapore", @"hkt": @"Asia/Hong_Kong", @"jst": @"Asia/Tokyo", @"kst": @"Asia/Seoul",
-        @"aest": @"Australia/Sydney", @"aedt": @"Australia/Sydney", @"acst": @"Australia/Adelaide", @"awst": @"Australia/Perth",
-        @"nzst": @"Pacific/Auckland", @"nzdt": @"Pacific/Auckland", @"brt": @"America/Sao_Paulo", @"art": @"America/Argentina/Buenos_Aires",
+// Abbreviations people type ("10am IST to CET"). They're shown back as typed, switched to the
+// standard/daylight variant that actually applies on the date (CET in winter, CEST in summer).
+static NSDictionary<NSString *, NSString *> *tzAbbrs(void) {
+    static NSDictionary *m;
+    if (!m) m = @{
+        @"pst": @"America/Los_Angeles", @"pdt": @"America/Los_Angeles", @"pt": @"America/Los_Angeles",
+        @"est": @"America/New_York", @"edt": @"America/New_York", @"et": @"America/New_York",
+        @"cst": @"America/Chicago", @"cdt": @"America/Chicago", @"ct": @"America/Chicago",
+        @"mst": @"America/Denver", @"mdt": @"America/Denver", @"mt": @"America/Denver",
+        @"akst": @"America/Anchorage", @"akdt": @"America/Anchorage", @"hst": @"Pacific/Honolulu",
+        @"ist": @"Asia/Kolkata", @"gmt": @"GMT", @"utc": @"UTC", @"bst": @"Europe/London",
+        @"wet": @"Europe/Lisbon", @"west": @"Europe/Lisbon", @"cet": @"Europe/Paris", @"cest": @"Europe/Paris",
+        @"eet": @"Europe/Athens", @"eest": @"Europe/Athens", @"msk": @"Europe/Moscow", @"gst": @"Asia/Dubai",
+        @"pkt": @"Asia/Karachi", @"npt": @"Asia/Kathmandu", @"ict": @"Asia/Bangkok", @"wib": @"Asia/Jakarta",
+        @"sgt": @"Asia/Singapore", @"hkt": @"Asia/Hong_Kong", @"jst": @"Asia/Tokyo", @"kst": @"Asia/Seoul",
+        @"aest": @"Australia/Sydney", @"aedt": @"Australia/Sydney", @"acst": @"Australia/Adelaide",
+        @"awst": @"Australia/Perth", @"nzst": @"Pacific/Auckland", @"nzdt": @"Pacific/Auckland",
+        @"brt": @"America/Sao_Paulo", @"art": @"America/Argentina/Buenos_Aires",
+        @"sast": @"Africa/Johannesburg", @"eat": @"Africa/Nairobi", @"wat": @"Africa/Lagos"};
+    return m;
+}
+static NSString *tzAbbrOn(NSString *abbr, NSTimeZone *tz, NSDate *d) {
+    static NSDictionary *dst;
+    if (!dst) dst = @{@"pst": @"pdt", @"est": @"edt", @"cst": @"cdt", @"mst": @"mdt", @"akst": @"akdt", @"wet": @"west",
+                      @"cet": @"cest", @"eet": @"eest", @"aest": @"aedt", @"nzst": @"nzdt"};
+    BOOL summer = [tz isDaylightSavingTimeForDate:d];
+    if (summer && dst[abbr]) abbr = dst[abbr];
+    if (!summer) for (NSString *k in dst) if ([dst[k] isEqual:abbr]) abbr = k;
+    return abbr.uppercaseString;
+}
+// Cities, regions and nicknames, plus overrides for countries that span several zones.
+static NSDictionary<NSString *, NSString *> *tzPlaces(void) {
+    static NSDictionary *m;
+    if (!m) m = @{
+        @"pacific": @"America/Los_Angeles", @"eastern": @"America/New_York", @"central": @"America/Chicago", @"mountain": @"America/Denver",
         @"sf": @"America/Los_Angeles", @"san francisco": @"America/Los_Angeles", @"bay area": @"America/Los_Angeles", @"la": @"America/Los_Angeles",
         @"seattle": @"America/Los_Angeles", @"portland": @"America/Los_Angeles", @"san diego": @"America/Los_Angeles", @"vegas": @"America/Los_Angeles",
-        @"las vegas": @"America/Los_Angeles", @"california": @"America/Los_Angeles", @"vancouver": @"America/Vancouver",
-        @"nyc": @"America/New_York", @"ny": @"America/New_York", @"new york": @"America/New_York", @"boston": @"America/New_York",
+        @"las vegas": @"America/Los_Angeles", @"california": @"America/Los_Angeles",
+        @"nyc": @"America/New_York", @"ny": @"America/New_York", @"boston": @"America/New_York",
         @"dc": @"America/New_York", @"washington": @"America/New_York", @"miami": @"America/New_York", @"atlanta": @"America/New_York",
         @"philadelphia": @"America/New_York", @"austin": @"America/Chicago", @"dallas": @"America/Chicago", @"houston": @"America/Chicago",
-        @"texas": @"America/Chicago", @"phoenix": @"America/Phoenix", @"arizona": @"America/Phoenix", @"hawaii": @"Pacific/Honolulu",
-        @"uk": @"Europe/London", @"england": @"Europe/London", @"britain": @"Europe/London", @"ireland": @"Europe/Dublin",
-        @"france": @"Europe/Paris", @"germany": @"Europe/Berlin", @"spain": @"Europe/Madrid", @"italy": @"Europe/Rome",
-        @"netherlands": @"Europe/Amsterdam", @"switzerland": @"Europe/Zurich", @"sweden": @"Europe/Stockholm", @"poland": @"Europe/Warsaw",
-        @"portugal": @"Europe/Lisbon", @"greece": @"Europe/Athens", @"turkey": @"Europe/Istanbul", @"russia": @"Europe/Moscow",
-        @"uae": @"Asia/Dubai", @"israel": @"Asia/Jerusalem", @"tel aviv": @"Asia/Jerusalem", @"saudi": @"Asia/Riyadh",
-        @"india": @"Asia/Kolkata", @"mumbai": @"Asia/Kolkata", @"bombay": @"Asia/Kolkata", @"delhi": @"Asia/Kolkata", @"new delhi": @"Asia/Kolkata",
+        @"texas": @"America/Chicago", @"arizona": @"America/Phoenix", @"hawaii": @"Pacific/Honolulu",
+        @"usa": @"America/New_York", @"us": @"America/New_York", @"united states": @"America/New_York", @"america": @"America/New_York",
+        @"canada": @"America/Toronto", @"brazil": @"America/Sao_Paulo", @"mexico": @"America/Mexico_City", @"russia": @"Europe/Moscow",
+        @"australia": @"Australia/Sydney", @"indonesia": @"Asia/Jakarta", @"spain": @"Europe/Madrid", @"portugal": @"Europe/Lisbon",
+        @"uk": @"Europe/London", @"england": @"Europe/London", @"britain": @"Europe/London", @"scotland": @"Europe/London",
+        @"europe": @"Europe/Paris", @"holland": @"Europe/Amsterdam", @"tel aviv": @"Asia/Jerusalem", @"saudi": @"Asia/Riyadh",
+        @"uae": @"Asia/Dubai", @"abu dhabi": @"Asia/Dubai",
+        @"ind": @"Asia/Kolkata", @"mumbai": @"Asia/Kolkata", @"bombay": @"Asia/Kolkata", @"delhi": @"Asia/Kolkata", @"new delhi": @"Asia/Kolkata",
         @"bangalore": @"Asia/Kolkata", @"bengaluru": @"Asia/Kolkata", @"chennai": @"Asia/Kolkata", @"hyderabad": @"Asia/Kolkata",
-        @"pune": @"Asia/Kolkata", @"pakistan": @"Asia/Karachi", @"nepal": @"Asia/Kathmandu", @"bangladesh": @"Asia/Dhaka",
-        @"thailand": @"Asia/Bangkok", @"vietnam": @"Asia/Ho_Chi_Minh", @"indonesia": @"Asia/Jakarta", @"philippines": @"Asia/Manila",
-        @"china": @"Asia/Shanghai", @"beijing": @"Asia/Shanghai", @"shenzhen": @"Asia/Shanghai", @"taiwan": @"Asia/Taipei",
-        @"japan": @"Asia/Tokyo", @"korea": @"Asia/Seoul", @"south korea": @"Asia/Seoul", @"australia": @"Australia/Sydney",
-        @"nz": @"Pacific/Auckland", @"new zealand": @"Pacific/Auckland", @"brazil": @"America/Sao_Paulo", @"mexico": @"America/Mexico_City",
-        @"argentina": @"America/Argentina/Buenos_Aires", @"nigeria": @"Africa/Lagos", @"kenya": @"Africa/Nairobi", @"egypt": @"Africa/Cairo",
-        @"south africa": @"Africa/Johannesburg", @"canada": @"America/Toronto"};
-    NSString *n = map[s];
-    if (n) return [NSTimeZone timeZoneWithName:n];
+        @"pune": @"Asia/Kolkata", @"gurgaon": @"Asia/Kolkata", @"noida": @"Asia/Kolkata", @"beijing": @"Asia/Shanghai", @"shenzhen": @"Asia/Shanghai",
+        @"korea": @"Asia/Seoul", @"nz": @"Pacific/Auckland", @"bay": @"America/Los_Angeles"};
+    return m;
+}
+// Every country, by its English name, from the system's zone table (first zone listed; tzPlaces overrides).
+static NSDictionary<NSString *, NSString *> *tzCountries(void) {
+    static NSMutableDictionary *m;
+    if (m) return m;
+    m = [NSMutableDictionary dictionary];
+    NSString *tab = [NSString stringWithContentsOfFile:@"/usr/share/zoneinfo/zone.tab" encoding:NSUTF8StringEncoding error:nil];
+    NSLocale *en = [NSLocale localeWithLocaleIdentifier:@"en_US"];
+    for (NSString *line in [tab componentsSeparatedByString:@"\n"]) {
+        NSArray *f = [line componentsSeparatedByString:@"\t"];
+        if (f.count < 3 || [line hasPrefix:@"#"]) continue;
+        NSString *name = [en localizedStringForCountryCode:f[0]].lowercaseString;
+        if (name && !m[name]) m[name] = f[2];
+    }
+    return m;
+}
+static NSString *tzCity(NSTimeZone *tz) {
+    NSString *n = [tz.name.lastPathComponent stringByReplacingOccurrencesOfString:@"_" withString:@" "];
+    return [n isEqual:@"Kolkata"] ? @"India" : n;
+}
+
+// A resolved zone and how to label it: the abbreviation as typed, a country's name, or (nil) the zone's city.
+typedef struct { NSTimeZone *tz; NSString *abbr, *name; BOOL exact; } TZRef;
+
+static TZRef tzFind(NSString *s, BOOL allowPrefix) {
+    TZRef r = {0};
+    s = trim(s);
+    if (!s.length) return r;
+    r.exact = YES;
+    if ([s isEqual:@"local"] || [s isEqual:@"here"] || [s isEqual:@"me"]) { r.tz = NSTimeZone.localTimeZone; return r; }
+    NSString *n;
+    if ((n = tzAbbrs()[s])) { r.tz = [NSTimeZone timeZoneWithName:n]; r.abbr = s; return r; }
+    // utc+5:30, gmt-3, utc +1
+    const char *c = s.UTF8String; int hh = 0, mm = 0; char sign = 0, rest[8] = "";
+    if ((!strncmp(c, "utc", 3) || !strncmp(c, "gmt", 3)) &&
+        sscanf(c + 3, " %c%2d%7s", &sign, &hh, rest) >= 2 && (sign == '+' || sign == '-') &&
+        (!rest[0] || sscanf(rest, ":%2d", &mm) == 1 || sscanf(rest, "%2d", &mm) == 1) && hh <= 14 && mm < 60) {
+        int secs = (hh * 3600 + mm * 60) * (sign == '-' ? -1 : 1);
+        r.tz = [NSTimeZone timeZoneForSecondsFromGMT:secs];
+        r.name = mm ? [NSString stringWithFormat:@"UTC%c%d:%02d", sign, hh, mm] : [NSString stringWithFormat:@"UTC%c%d", sign, hh];
+        return r;
+    }
+    NSDictionary *countries = tzCountries();
+    if ((n = tzPlaces()[s] ?: countries[s])) {
+        r.tz = [NSTimeZone timeZoneWithName:n];
+        if (countries[s]) r.name = s.capitalizedString;
+        return r;
+    }
     NSString *u = [s stringByReplacingOccurrencesOfString:@" " withString:@"_"];
     for (NSString *name in NSTimeZone.knownTimeZoneNames) {
         NSString *l = name.lowercaseString;
-        if ([l isEqual:u] || [l.lastPathComponent isEqual:u]) return [NSTimeZone timeZoneWithName:name];
+        if ([l isEqual:u] || [l.lastPathComponent isEqual:u]) { r.tz = [NSTimeZone timeZoneWithName:name]; return r; }
     }
-    return nil;
+    // Unique-enough prefix ("ams", "sing", "netherl"): the shortest name that starts with it.
+    r.exact = NO;
+    if (!allowPrefix || s.length < 3) return r;
+    __block NSString *best = nil, *bestZone = nil;
+    void (^consider)(NSString *, NSString *) = ^(NSString *cand, NSString *zone) {
+        if ([cand hasPrefix:s] && (!best || cand.length < best.length || (cand.length == best.length && [cand compare:best] < 0))) { best = cand; bestZone = zone; }
+    };
+    [tzPlaces() enumerateKeysAndObjectsUsingBlock:^(NSString *k, NSString *z, BOOL *stop) { if (k.length > 3) consider(k, z); }];
+    [countries enumerateKeysAndObjectsUsingBlock:^(NSString *k, NSString *z, BOOL *stop) { consider(k, z); }];
+    for (NSString *name in NSTimeZone.knownTimeZoneNames)
+        consider([name.lastPathComponent.lowercaseString stringByReplacingOccurrencesOfString:@"_" withString:@" "], name);
+    if (!best) return r;
+    r.tz = [NSTimeZone timeZoneWithName:tzPlaces()[best] ?: countries[best] ?: bestZone];
+    if (countries[best] && !tzPlaces()[best]) r.name = best.capitalizedString;
+    return r;
 }
-// Parses "3pm", "3:30 pm", "15:00", "noon", "midnight", "now". h=-1 means now.
-static BOOL parseClock(NSString *str, int *h, int *m) {
+static NSString *tzLabel(TZRef r, NSDate *d) { return r.abbr ? tzAbbrOn(r.abbr, r.tz, d) : r.name ?: tzCity(r.tz); }
+// The label plus the zone's abbreviation when it has a real one: "New York (EST)", but not "India (GMT+5:30)".
+static NSString *tzLabelLong(TZRef r, NSDate *d) {
+    NSString *a = r.abbr || [r.name hasPrefix:@"UTC"] ? nil : [r.tz abbreviationForDate:d];
+    return a && ![a hasPrefix:@"GMT+"] && ![a hasPrefix:@"GMT-"] ? [NSString stringWithFormat:@"%@ (%@)", tzLabel(r, d), a] : tzLabel(r, d);
+}
+
+// Parses "3pm", "3:30 pm", "15:00", "noon", "midnight", "now" (h = -1). With `loose`, also a bare hour ("10")
+// or 24-hour digits ("1500", "930"); only used when both zones were named exactly, so "5 km to mi" stays a unit query.
+static BOOL parseClock(NSString *str, int *h, int *m, BOOL loose) {
     str = trim(str);
     if ([str isEqual:@"now"]) { *h = -1; *m = 0; return YES; }
     if ([str isEqual:@"noon"]) { *h = 12; *m = 0; return YES; }
     if ([str isEqual:@"midnight"]) { *h = 0; *m = 0; return YES; }
     const char *c = str.UTF8String; int i = 0, hh = 0, mm = 0;
     if (!isdigit((unsigned char)c[0])) return NO;
-    while (isdigit((unsigned char)c[i]) && i < 2) hh = hh * 10 + (c[i++] - '0');
+    while (isdigit((unsigned char)c[i]) && i < 4) hh = hh * 10 + (c[i++] - '0');
+    int nd = i;
+    if (nd > 2) { if (!loose || c[i]) return NO; mm = hh % 100; hh /= 100; *h = hh; *m = mm; return hh < 24 && mm < 60; }
     BOOL colon = NO;
     if (c[i] == ':' || c[i] == '.') {
         colon = YES; i++;
@@ -487,73 +573,84 @@ static BOOL parseClock(NSString *str, int *h, int *m) {
     int ap = 0;
     if (!strcmp(c + i, "am") || !strcmp(c + i, "a") || !strcmp(c + i, "a.m.")) ap = 1;
     else if (!strcmp(c + i, "pm") || !strcmp(c + i, "p") || !strcmp(c + i, "p.m.")) ap = 2;
+    else if (!strcmp(c + i, "h") || !strcmp(c + i, "hrs")) { if (!colon && !loose) return NO; }
     else if (c[i]) return NO;
-    if (!colon && !ap) return NO;
+    if (!colon && !ap && !loose) return NO;
     if (ap) { if (hh < 1 || hh > 12) return NO; hh %= 12; if (ap == 2) hh += 12; }
     else if (hh > 23) return NO;
     if (mm > 59) return NO;
     *h = hh; *m = mm; return YES;
 }
-static NSString *tzCity(NSTimeZone *tz) {
-    NSString *n = [tz.name.lastPathComponent stringByReplacingOccurrencesOfString:@"_" withString:@" "];
-    return [n isEqual:@"Kolkata"] ? @"India" : n;
-}
-static NSString *tzAbbr(NSTimeZone *tz, NSDate *d) {
-    NSString *a = [tz abbreviationForDate:d];
-    return [a hasPrefix:@"GMT+"] || [a hasPrefix:@"GMT-"] ? @"" : [NSString stringWithFormat:@" (%@)", a];
-}
 static NSString *fmtDay(NSDate *d, NSTimeZone *tz) {
     time_t t = (time_t)d.timeIntervalSince1970 + [tz secondsFromGMTForDate:d];
     struct tm tm; gmtime_r(&t, &tm); char b[32]; strftime(b, sizeof b, "%a, %b %-d", &tm); return @(b);
 }
-static NSString *fmtClock(NSDate *d, NSTimeZone *tz, BOOL day) {
+static NSString *fmtClock(NSDate *d, NSTimeZone *tz) {
     time_t t = (time_t)d.timeIntervalSince1970 + [tz secondsFromGMTForDate:d];
     struct tm tm; gmtime_r(&t, &tm);
-    char b[48];
-    strftime(b, sizeof b, day ? "%-I:%M %p  ·  %a, %b %-d" : "%-I:%M %p", &tm);
+    char b[16]; strftime(b, sizeof b, "%-I:%M %p", &tm);
     return @(b);
 }
-static Item *tzResult(NSDate *d, NSTimeZone *a, NSTimeZone *b, BOOL isNow) {
-    long diff = ([b secondsFromGMTForDate:d] - [a secondsFromGMTForDate:d]) / 60;
+static Item *tzResult(NSDate *d, TZRef a, TZRef b, BOOL isNow) {
+    long diff = ([b.tz secondsFromGMTForDate:d] - [a.tz secondsFromGMTForDate:d]) / 60;
     NSString *off = diff ? [NSString stringWithFormat:@"%c%ld%@", diff < 0 ? '-' : '+', labs(diff) / 60,
                                   labs(diff) % 60 ? [NSString stringWithFormat:@":%02ld", labs(diff) % 60] : @""] : @"same time";
-    NSString *lhs = isNow ? @"Now" : fmtClock(d, a, NO);
-    NSString *lcap = isNow ? [NSString stringWithFormat:@"%@ · %@", tzCity(a), fmtClock(d, a, NO)] : tzCity(a);
-    NSString *rcap = [NSString stringWithFormat:@"%@%@  ·  %@  ·  %@", tzCity(b), tzAbbr(b, d), fmtDay(d, b), off];
-    return mkCalc(lhs, lcap, fmtClock(d, b, NO), rcap, fmtClock(d, b, NO));
+    NSString *lhs = isNow ? @"Now" : fmtClock(d, a.tz);
+    NSString *lcap = isNow ? [NSString stringWithFormat:@"%@ · %@", tzLabel(a, d), fmtClock(d, a.tz)] : tzLabel(a, d);
+    NSString *rcap = [NSString stringWithFormat:@"%@  ·  %@  ·  %@", tzLabelLong(b, d), fmtDay(d, b.tz), off];
+    return mkCalc(lhs, lcap, fmtClock(d, b.tz), rcap, fmtClock(d, b.tz));
 }
 static Item *tzQuery(NSString *q) {
-    NSTimeZone *local = NSTimeZone.localTimeZone;
-    for (NSString *pre in @[@"time in ", @"now in ", @"time at ", @"current time in ", @"what time is it in "])
-        if ([q hasPrefix:pre]) { NSTimeZone *tz = tzLookup([q substringFromIndex:pre.length]); return tz ? tzResult(NSDate.date, local, tz, YES) : nil; }
+    TZRef local = {NSTimeZone.localTimeZone, nil, nil, YES};
+    while (q.length && strchr("?!.", [q characterAtIndex:q.length - 1])) q = trim([q substringToIndex:q.length - 1]);
+    int dayOff = 0;
+    for (NSString *w in @[@"tomorrow", @"today", @"yesterday"]) {
+        int d = [w isEqual:@"tomorrow"] ? 1 : [w isEqual:@"yesterday"] ? -1 : 0;
+        if ([q hasSuffix:[@" " stringByAppendingString:w]]) { q = [q substringToIndex:q.length - w.length - 1]; dayOff = d; }
+        else if ([q hasPrefix:[w stringByAppendingString:@" "]]) { q = [q substringFromIndex:w.length + 1]; dayOff = d; }
+    }
+    for (NSString *pre in @[@"time in ", @"now in ", @"time at ", @"current time in ", @"what time is it in ", @"what's the time in "])
+        if ([q hasPrefix:pre]) { TZRef z = tzFind([q substringFromIndex:pre.length], YES); return z.tz ? tzResult(NSDate.date, local, z, YES) : nil; }
     if ([q hasSuffix:@" time"]) {
-        NSTimeZone *tz = tzLookup([q substringToIndex:q.length - 5]);
-        if (tz) return tzResult(NSDate.date, local, tz, YES);
+        TZRef z = tzFind([q substringToIndex:q.length - 5], NO);
+        if (z.tz) return tzResult(NSDate.date, local, z, YES);
     }
     NSString *left = q, *right = nil;
-    for (NSString *sep in @[@" to ", @" in ", @" -> ", @" → "]) {
+    for (NSString *sep in @[@" to ", @" in ", @" into ", @" -> ", @" → ", @" = "]) {
         NSRange r = [q rangeOfString:sep options:NSBackwardsSearch];
         if (r.location != NSNotFound) { left = [q substringToIndex:r.location]; right = [q substringFromIndex:NSMaxRange(r)]; break; }
     }
+    TZRef b = right ? tzFind(right, YES) : local;
+    if (!b.tz) return nil;
     NSArray *w = [trim(left) componentsSeparatedByString:@" "];
-    for (NSUInteger k = 1; k <= MIN(3u, w.count); k++) {
-        int h, m;
-        if (!parseClock([[w subarrayWithRange:NSMakeRange(0, k)] componentsJoinedByString:@" "], &h, &m)) continue;
-        NSString *rest = [[w subarrayWithRange:NSMakeRange(k, w.count - k)] componentsJoinedByString:@" "];
-        if (!rest.length && !right) return nil;
-        NSTimeZone *a = rest.length ? tzLookup(rest) : local;
-        NSTimeZone *b = right ? tzLookup(right) : local;
-        if (!a || !b) return nil;
-        NSDate *d = NSDate.date;
-        if (h >= 0) {
-            NSCalendar *cal = [NSCalendar calendarWithIdentifier:NSCalendarIdentifierGregorian];
-            cal.timeZone = a;
-            NSDateComponents *c = [cal components:NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay fromDate:d];
-            c.hour = h; c.minute = m;
-            d = [cal dateFromComponents:c];
+    NSUInteger n = w.count;
+    // "10am ist", "10 am ist", "ist 10am": the clock is the first or last 1–2 words, the zone is the rest
+    for (int pass = 0; pass < 2; pass++) {
+        for (NSUInteger k = 1; k <= MIN(2u, n); k++) {
+            NSRange cr = pass == 0 ? NSMakeRange(0, k) : NSMakeRange(n - k, k);
+            NSRange zr = pass == 0 ? NSMakeRange(k, n - k) : NSMakeRange(0, n - k);
+            if (pass == 1 && !zr.length) continue;
+            NSString *clock = [[w subarrayWithRange:cr] componentsJoinedByString:@" "];
+            NSString *zone = [[w subarrayWithRange:zr] componentsJoinedByString:@" "];
+            if (!zone.length && !right) continue;
+            TZRef a = zone.length ? tzFind(zone, YES) : local;
+            if (!a.tz) continue;
+            int h, m;
+            BOOL namedExactly = zone.length && a.exact && (!right || b.exact);
+            if (!parseClock(clock, &h, &m, NO) && !(namedExactly && parseClock(clock, &h, &m, YES))) continue;
+            NSDate *d = NSDate.date;
+            if (h >= 0) {
+                NSCalendar *cal = [NSCalendar calendarWithIdentifier:NSCalendarIdentifierGregorian];
+                cal.timeZone = a.tz;
+                NSDateComponents *c = [cal components:NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay fromDate:d];
+                c.hour = h; c.minute = m; c.day += dayOff;
+                d = [cal dateFromComponents:c];
+            }
+            return tzResult(d, a, b, NO);
         }
-        return tzResult(d, a, b, NO);
     }
+    // "ist to cet": what time is it in both, right now (exact names only, so "usd to inr" doesn't land here)
+    if (right && b.exact) { TZRef a = tzFind(left, NO); if (a.tz) return tzResult(NSDate.date, a, b, YES); }
     return nil;
 }
 

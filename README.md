@@ -21,7 +21,10 @@ make uninstall
 | `⌘,` | edit `~/.config/rayfast/config` |
 
 Conversions: `5 km to mi`, `72f`, `3 cups in ml`, `1 gib in mb`, `100 usd to inr`, `€50`, `20% of 150`,
-`sqrt(2)*pi`, `time in nyc`, `london time`, `3pm pst to ist`, `noon tokyo to nyc`.
+`sqrt(2)*pi`, `time in nyc`, `london time`, `3pm pst to ist`, `noon tokyo to nyc`, `10am IST to CET`, `10 ist to cet`,
+`ist to cet` (now), `1500 utc to jst`, `10am ind to amsterdam`, `9am pst to utc-3:30`, `10am ist to cet tomorrow`.
+Time zones accept abbreviations (shown back as typed, switched to CEST/PDT etc. when daylight time applies), any
+country or zone city by name, and unique prefixes (`ams`, `sing`).
 Exchange rates come from open.er-api.com (fetched by `/usr/bin/curl`, cached 6h in `~/Library/Caches`).
 
 ## Numbers
