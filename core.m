@@ -70,6 +70,7 @@ NSString *comboString(UInt32 key, UInt32 mods, BOOL pretty) {
 
 NSMutableArray<Binding *> *gBinds;
 Binding *gToggle;
+NSString *gFiles = @"auto";
 static UInt32 gNextHid;
 static time_t gCfgMtime;
 
@@ -89,6 +90,9 @@ void rfSaveConfig(void) {
         @"# Modifiers: cmd opt ctrl shift hyper.  Keys: a-z 0-9 f1-f19 space return tab left right up down ...\n"
         @"# Bind apps with:  ctrl+opt+s = /Applications/Safari.app   (or press ⌘K on an app in the launcher)\n\n"];
     [s appendFormat:@"toggle = %@\n\n", comboString(gToggle->key, gToggle->mods, NO)];
+    [s appendFormat:@"# Search Files provider: auto (DigUp when it's installed, else Spotlight), spotlight, or digup.\n"
+                    @"# ⇥ in the file results switches between them and saves the choice here.\n"
+                    @"files = %@\n\n", gFiles];
     for (Binding *b in gBinds) [s appendFormat:@"%@ = %@\n", comboString(b->key, b->mods, NO), b->path];
     [s writeToFile:cfgPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
     gCfgMtime = mtimeOf(cfgPath());
@@ -99,6 +103,7 @@ static void loadConfig(void) {
     gBinds = [NSMutableArray array];
     gToggle = [Binding new];
     parseCombo(@"cmd+space", &gToggle->key, &gToggle->mods);
+    gFiles = @"auto";
     NSString *txt = [NSString stringWithContentsOfFile:cfgPath() encoding:NSUTF8StringEncoding error:nil];
     if (!txt) { rfSaveConfig(); txt = @""; }
     for (NSString *line in [txt componentsSeparatedByString:@"\n"]) {
@@ -109,6 +114,7 @@ static void loadConfig(void) {
         NSString *k = trim([l substringToIndex:r.location]), *v = trim([l substringFromIndex:NSMaxRange(r)]);
         if ([k isEqual:@"toggle"]) { parseCombo(v, &gToggle->key, &gToggle->mods); continue; }
         if ([k isEqual:@"mode"]) continue;   // older configs: there is only one mode now
+        if ([k isEqual:@"files"]) { NSString *f = v.lowercaseString; if ([@[@"auto", @"spotlight", @"digup"] containsObject:f]) gFiles = f; continue; }
         Binding *b = [Binding new];
         if (!parseCombo(k, &b->key, &b->mods)) { NSLog(@"rayfast: bad hotkey '%@'", k); continue; }
         b->path = [v stringByExpandingTildeInPath];

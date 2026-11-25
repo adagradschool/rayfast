@@ -809,6 +809,7 @@ static NSString *gPlaceholder = @"Search for apps and conversions…";
     NSMutableArray<App *> *apps; NSArray<Item *> *rows; int sel;
     App *recording; BOOL hiding;
     BOOL fileMode, searching; NSString *fileQuery; NSArray<Item *> *fileRows; NSTask *mdTask; int fileGen;   // file search
+    BOOL dig; NSString *fileNote; NSTask *dgTask; NSFileHandle *dgIn;                                     // DigUp provider
     double lastScan;
 }
 - (BOOL)handleKey:(NSEvent *)e;
@@ -820,6 +821,7 @@ static NSString *gPlaceholder = @"Search for apps and conversions…";
 - (void)scanApps;
 @end
 static R *gR;
+static NSString *digupBinary(void);
 
 static CGFloat rowHeight(Item *it) { return it->kind == K_HEADER ? HH : (it->kind == K_CALC || it->kind == K_INFO) ? CH : RH; }
 
@@ -1036,7 +1038,7 @@ static void needsRender(void) {
             [parts addObject:[c substringFromIndex:k]];
             for (NSString *pt in parts.reverseObjectEnumerator) right = drawKeycap(pt, right, y + h / 2) - 4;
         } else {
-            right = drawLabelRTL(it->kind == K_APP ? @"Application" : it->kind == K_FILE ? (it->app->dir ? @"Folder" : @"File") : @"Command", acc, right, y + h / 2) - 12;
+            right = drawLabelRTL(it->kind == K_APP ? @"Application" : it->kind == K_FILE ? (it->glyph ?: it->app->dir ? @"Folder" : @"File") : @"Command", acc, right, y + h / 2) - 12;
         }
         NSSize ts = [it->title sizeWithAttributes:ttl];
         CGFloat tw = MIN(ts.width, right - 56);
@@ -1070,7 +1072,9 @@ static void needsRender(void) {
     NSDictionary *dim = attrs(12, NSFontWeightRegular, NSColor.secondaryLabelColor);
     // left: status (the colour logo mark is its own small layer)
     Item *it = (gR->sel >= 0 && gR->sel < (int)gR->rows.count) ? gR->rows[gR->sel] : nil;
-    NSString *status = gR->recording ? @"Recording hotkey…" : gFetching ? @"Updating exchange rates…" : gR->searching ? @"Searching files…" : nil;
+    NSString *status = gR->recording ? @"Recording hotkey…" : gFetching ? @"Updating exchange rates…"
+                     : gR->searching ? (gR->dig ? (gR->fileRows.count ? @"Searching by meaning…" : @"Searching…") : @"Searching files…") : nil;
+    if (!status && gR->fileMode && digupBinary()) status = gR->dig ? @"⇥  Spotlight" : @"⇥  DigUp";
     if (status) [status drawAtPoint:NSMakePoint(40, mid - 8) withAttributes:dim];
     // right: primary action ↩ | secondary action ⌘K
     CGFloat x = W - 14;
@@ -1194,6 +1198,8 @@ static void scanDir(NSMutableArray *out, NSMutableSet *seen, const char *dir, in
         if ([p isEqual:@"down"]) [self moveSel:1];
         if ([p isEqual:@"cmdk"]) [self startRecording];
         if ([p isEqual:@"enter"]) [self activateSelected];
+        if ([p isEqual:@"tab"] && fileMode) [self switchProvider];
+        if ([p hasPrefix:@"q="]) { field.stringValue = [p substringFromIndex:2]; [self refresh]; }   // type, staying in file mode
     }
     if ([parts containsObject:@"nopng"]) return;
     [self render];
@@ -1383,6 +1389,7 @@ static void drawView(NSView *v, CGContextRef c) {
     if (hiding || !shown) return;
     hiding = YES; shown = NO;
     recording = nil;
+    [self digupStop];       // before the respawn: the helper is this launcher session's child
     [panel orderOut:nil];   // also hands keyboard focus back to the previous app
     hiding = NO;
     dispatch_async(dispatch_get_main_queue(), ^{ if (!shown && panel) { [self resetToIdle]; prepared = YES; } });
@@ -1402,7 +1409,9 @@ static void drawView(NSView *v, CGContextRef c) {
     const char *lq = trim(q.lowercaseString).UTF8String;
     if (fileMode) {
         [self searchFiles:trim(q)];
-        [out addObject:mkItem(K_HEADER, !*lq ? @"Files" : searching && !fileRows.count ? @"Searching…" : fileRows.count ? @"Files" : @"No Files Found", nil, nil, nil)];
+        NSString *src = dig ? @"DigUp" : @"Spotlight";
+        NSString *hdr = fileNote ?: !*lq ? src : searching && !fileRows.count ? @"Searching…" : fileRows.count ? src : @"No Files Found";
+        [out addObject:mkItem(K_HEADER, hdr, nil, nil, nil)];
         [out addObjectsFromArray:fileRows ?: @[]];
     } else if (!*lq) {
         // empty query: most-used apps
@@ -1429,9 +1438,13 @@ static void drawView(NSView *v, CGContextRef c) {
         }
         const struct { const char *t, *s, *kw; SEL sel; } acts[] = {
             {"Edit Config", "rayfast", "rayfast config settings hotkeys preferences", @selector(openConfig)},
-            {"Quit", "rayfast", "quit rayfast exit", @selector(quit)}};
-        for (size_t i = 0; i < 2; i++) {
+            {"Quit", "rayfast", "quit rayfast exit", @selector(quit)},
+            {"Use DigUp for File Search", "rayfast", "digup file search provider contents meaning", @selector(useDigupForFiles)},
+            {"Use Spotlight for File Search", "rayfast", "spotlight file search provider names", @selector(useSpotlightForFiles)}};
+        for (size_t i = 0; i < sizeof acts / sizeof *acts; i++) {
             if (strlen(lq) < 3 || !strstr(acts[i].kw, lq)) continue;
+            if (acts[i].sel == @selector(useDigupForFiles) && (!digupBinary() || [gFiles isEqual:@"digup"])) continue;
+            if (acts[i].sel == @selector(useSpotlightForFiles) && [gFiles isEqual:@"spotlight"]) continue;
             if (!header) { [out addObject:mkItem(K_HEADER, @"Results", nil, nil, nil)]; header = YES; }
             Item *it = mkItem(K_ACTION, @(acts[i].t), @(acts[i].s), nil, @"✦"); it->action = acts[i].sel;
             [out addObject:it];
@@ -1440,7 +1453,7 @@ static void drawView(NSView *v, CGContextRef c) {
         NSString *tq = trim(q);
         if (tq.length > 32) tq = [[tq substringToIndex:31] stringByAppendingString:@"…"];
         [out addObject:mkItem(K_HEADER, [NSString stringWithFormat:@"Use “%@” with…", tq], nil, nil, nil)];
-        Item *fs = mkItem(K_ACTION, @"Search Files", nil, nil, @"⌕"); fs->action = @selector(enterFileMode);
+        Item *fs = mkItem(K_ACTION, @"Search Files", wantDigup() ? @"DigUp" : @"Spotlight", nil, @"⌕"); fs->action = @selector(enterFileMode);
         [out addObject:fs];
     }
     rows = out;
@@ -1450,15 +1463,59 @@ static void drawView(NSView *v, CGContextRef c) {
     [self redraw];
 }
 #pragma mark file search
+static NSString *const DIGUP_ID = @"com.abdurrahim.DigUp";
+// nil when DigUp isn't installed: everything DigUp-related then hides itself and file search is Spotlight's.
+static NSString *digupBinary(void) {
+    NSArray *candidates = getenv("RF_DIGUP") ? @[@(getenv("RF_DIGUP"))]   // tests (a missing path = not installed)
+        : @[@"/Applications/DigUp.app/Contents/Helpers/digup", [NSHomeDirectory() stringByAppendingPathComponent:@"Applications/DigUp.app/Contents/Helpers/digup"]];
+    for (NSString *p in candidates) if ([NSFileManager.defaultManager isExecutableFileAtPath:p]) return p;
+    return nil;
+}
+// DigUp's own settings (its folders, skipped folders and types, index location), read from its preferences so
+// rayfast searches exactly what DigUp indexes. Lists are plist arrays or ":"-joined paths, as DigUp reads them.
+static id digupPrefValue(NSString *key) {
+    const char *env = getenv([@"RF_DIGUP_" stringByAppendingString:key].UTF8String);   // tests: RF_DIGUP_roots, RF_DIGUP_indexDir
+    if (env) return @(env);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)DIGUP_ID);
+    return CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)DIGUP_ID));
+}
+static NSString *digupPrefString(NSString *key) { id v = digupPrefValue(key); return [v isKindOfClass:NSString.class] ? [v stringByExpandingTildeInPath] : nil; }
+static NSArray<NSString *> *digupPref(NSString *key) {
+    id v = digupPrefValue(key);
+    NSArray *list = [v isKindOfClass:NSArray.class] ? v : [v isKindOfClass:NSString.class] && [v length] ? [v componentsSeparatedByString:@":"] : @[];
+    NSMutableArray *out = [NSMutableArray array];
+    for (id x in list) if ([x isKindOfClass:NSString.class] && [x length]) [out addObject:[x stringByExpandingTildeInPath]];
+    return out;
+}
+static BOOL wantDigup(void) {
+    if ([gFiles isEqual:@"spotlight"] || !digupBinary()) return NO;
+    return [gFiles isEqual:@"digup"] || digupPref(@"roots").count > 0;   // auto: only once DigUp has folders to search
+}
 // Spotlight via /usr/bin/mdfind, out of process like curl: the Metadata framework never loads into rayfast.
 - (void)enterFileMode {
-    fileMode = YES; fileQuery = nil; fileRows = nil;
-    gPlaceholder = @"Search files…";
+    fileMode = YES; fileQuery = nil; fileRows = nil; fileNote = nil;
+    dig = wantDigup();
+    gPlaceholder = dig ? @"Describe what's in the file…" : @"Search files…";
+    if (dig) [self digupStart];   // index open + encoder warming while you type
     [self refresh];
 }
+// ⇥ in file results: the other provider, remembered in the config
+- (void)switchProvider {
+    if (!digupBinary()) { NSBeep(); return; }
+    gFiles = dig ? @"spotlight" : @"digup";
+    rfSaveConfig();
+    NSString *q = field.stringValue;
+    [self leaveFileMode];
+    [self enterFileMode];
+    field.stringValue = q;
+    [self refresh];
+}
+- (void)setFilesProvider:(NSString *)f { gFiles = f; rfSaveConfig(); [self refresh]; }
+- (void)useDigupForFiles { [self setFilesProvider:@"digup"]; }
+- (void)useSpotlightForFiles { [self setFilesProvider:@"spotlight"]; }
 - (void)leaveFileMode {
     fileGen++; [mdTask terminate]; mdTask = nil;
-    fileMode = searching = NO; fileQuery = nil; fileRows = nil;
+    fileMode = searching = NO; fileQuery = nil; fileRows = nil; fileNote = nil;
     gPlaceholder = @"Search for apps and conversions…";
 }
 - (void)searchFiles:(NSString *)q {
@@ -1469,7 +1526,8 @@ static void drawView(NSView *v, CGContextRef c) {
     if (!q.length) { fileRows = nil; searching = NO; return; }
     searching = YES;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{   // debounce typing
-        if (my == fileGen && fileMode) [self runMdfind:q gen:my];
+        if (my != fileGen || !fileMode) return;
+        if (dig) [self runDigup:q gen:my]; else [self runMdfind:q gen:my];
     });
 }
 // Lower is better: name starts with the query, then a word in the name does, then anywhere.
@@ -1542,6 +1600,121 @@ static int fileNameRank(NSString *name, NSArray<NSString *> *words) {
             [self refresh];
         });
     });
+}
+#pragma mark DigUp
+// DigUp (github.com/ARahim3/DigUp) searches files by what's in them with an on-device embedding model. Its app ships
+// a `digup search-service` helper that speaks JSON lines over stdin/stdout: rayfast runs it as a child process for the
+// launcher session (like mdfind and curl, nothing of it loads into rayfast) and stops it on hide, before respawning.
+// Each query goes out twice: keyword-only at once (prefix-matching the last word), then by meaning after a pause.
+- (BOOL)digupStart {
+    if (dgTask.running) return YES;
+    NSString *bin = digupBinary();
+    if (!bin) return NO;
+    NSMutableArray *args = [NSMutableArray arrayWithObject:@"search-service"];
+    [args addObjectsFromArray:digupPref(@"roots")];                       // the folders DigUp indexes: results are limited to them
+    for (NSString *f in digupPref(@"excludedFolders")) [args addObjectsFromArray:@[@"--exclude", f]];
+    for (NSString *t in digupPref(@"excludedTypes")) [args addObjectsFromArray:@[@"--exclude-ext", t]];
+    for (NSString *f in digupPref(@"codeRoots")) [args addObjectsFromArray:@[@"--code-root", f]];
+    for (NSString *f in digupPref(@"codeExcludedFolders")) [args addObjectsFromArray:@[@"--code-exclude", f]];
+    NSString *dir = digupPrefString(@"indexDir");
+    if (dir.length) [args addObjectsFromArray:@[@"--index", dir]];
+    [args addObjectsFromArray:@[@"--encoder-idle", @"60"]];
+    NSTask *t = [NSTask new];
+    t.executableURL = [NSURL fileURLWithPath:bin];
+    t.arguments = args;
+    NSPipe *in = [NSPipe pipe], *out = [NSPipe pipe];
+    t.standardInput = in; t.standardOutput = out; t.standardError = NSFileHandle.fileHandleWithNullDevice;
+    __weak R *wself = self;
+    t.terminationHandler = ^(NSTask *ended) {   // crashed, killed, or DigUp was updated/removed: don't leave "Searching…" up
+        dispatch_async(dispatch_get_main_queue(), ^{ [wself digupEnded:ended]; });
+    };
+    if (![t launchAndReturnError:nil]) return NO;
+    dgTask = t; dgIn = in.fileHandleForWriting;
+    NSMutableData *buf = [NSMutableData data];
+    __weak R *ws = self;
+    out.fileHandleForReading.readabilityHandler = ^(NSFileHandle *h) {
+        NSData *d = h.availableData;
+        if (!d.length) { h.readabilityHandler = nil; return; }
+        [buf appendData:d];
+        const char *b = buf.bytes; NSUInteger start = 0;
+        for (NSUInteger i = 0; i < buf.length; i++) {
+            if (b[i] != '\n') continue;
+            id msg = [NSJSONSerialization JSONObjectWithData:[buf subdataWithRange:NSMakeRange(start, i - start)] options:0 error:nil];
+            if ([msg isKindOfClass:NSDictionary.class]) dispatch_async(dispatch_get_main_queue(), ^{ [ws digupReply:msg]; });
+            start = i + 1;
+        }
+        [buf replaceBytesInRange:NSMakeRange(0, start) withBytes:NULL length:0];
+    };
+    [self digupSend:@{@"op": @"prewarm"}];
+    return YES;
+}
+- (void)digupEnded:(NSTask *)ended {
+    if (ended != dgTask) return;   // a helper we stopped on purpose
+    dgTask = nil; dgIn = nil;
+    if (fileMode && dig && searching) { searching = NO; fileRows = fileRows ?: @[]; fileNote = @"DigUp's helper stopped: type again to retry, or ⇥ for Spotlight"; [self refresh]; }
+}
+- (void)digupSend:(NSDictionary *)req {
+    if (!dgTask.running) return;
+    NSMutableData *d = [[NSJSONSerialization dataWithJSONObject:req options:0 error:nil] mutableCopy];
+    [d appendBytes:"\n" length:1];
+    [dgIn writeData:d error:nil];   // SIGPIPE is ignored (uiRun), so a dead helper is just an error here
+}
+- (void)digupStop {
+    if (!dgTask) return;
+    [self digupSend:@{@"op": @"quit"}];
+    [dgIn closeFile];
+    NSTask *t = dgTask; dgTask = nil; dgIn = nil;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ if (t.running) [t terminate]; });
+}
+- (void)runDigup:(NSString *)q gen:(int)my {
+    if (!digupPref(@"roots").count) { searching = NO; fileRows = @[]; fileNote = @"DigUp has no folders yet: choose some in DigUp"; [self refresh]; return; }
+    if (![self digupStart]) { searching = NO; fileRows = @[]; fileNote = @"DigUp's search helper didn't start"; [self refresh]; return; }
+    [self digupSend:@{@"op": @"search", @"q": q, @"limit": @40, @"meaning": @NO, @"prefix_last": @YES, @"id": @(my * 2)}];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        if (my == fileGen && fileMode && dig) [self digupSend:@{@"op": @"search", @"q": q, @"limit": @40, @"meaning": @YES, @"id": @(my * 2 + 1)}];
+    });
+}
+static NSString *digupWhere(NSDictionary *h) {
+    NSString *seg = h[@"segment"]; id l = h[@"loc"], le = h[@"loc_end"];
+    if (![l isKindOfClass:NSNumber.class]) l = nil;
+    double loc = [l doubleValue], end = [le isKindOfClass:NSNumber.class] ? [le doubleValue] : loc;
+    if (!l && ![seg isEqual:@"ocr"]) return nil;
+    if ([seg isEqual:@"page"] || [seg isEqual:@"page_image"]) return [NSString stringWithFormat:@"p. %d", (int)loc];
+    if ([seg isEqual:@"audio"] || [seg isEqual:@"frame"]) { int t = (int)loc; return t >= 3600 ? [NSString stringWithFormat:@"%d:%02d:%02d", t / 3600, t / 60 % 60, t % 60] : [NSString stringWithFormat:@"%d:%02d", t / 60, t % 60]; }
+    if ([seg isEqual:@"chunk"]) return [NSString stringWithFormat:@"part %d", (int)loc];
+    if ([seg isEqual:@"lines"]) return [NSString stringWithFormat:@"lines %d–%d", (int)loc, (int)end];
+    if ([seg isEqual:@"cells"]) return [NSString stringWithFormat:@"cells %d–%d", (int)loc, (int)end];
+    if ([seg isEqual:@"ocr"]) return @"text in image";
+    return nil;
+}
+- (void)digupReply:(NSDictionary *)msg {
+    if (![msg[@"id"] isKindOfClass:NSNumber.class]) return;   // {"event":"ready"}, and replies to requests sent without an id (prewarm, quit)
+    int id_ = [msg[@"id"] intValue], my = id_ / 2;
+    if (my != fileGen || !fileMode || !dig) return;   // an older query, or the user moved on
+    BOOL byMeaning = id_ % 2;
+    if ([msg[@"error"] isKindOfClass:NSString.class]) { fileNote = [@"DigUp: " stringByAppendingString:msg[@"error"]]; searching = NO; fileRows = fileRows ?: @[]; [self refresh]; return; }
+    static NSDictionary *kinds;
+    if (!kinds) kinds = @{@"screenshot": @"Screenshot", @"image": @"Image", @"pdf": @"PDF", @"doc": @"Document",
+                          @"audio": @"Audio", @"video": @"Video", @"code": @"Code"};
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSDictionary *h in [msg[@"hits"] isKindOfClass:NSArray.class] ? msg[@"hits"] : @[]) {
+        if (![h isKindOfClass:NSDictionary.class]) continue;
+        NSString *path = h[@"path"];
+        if (![path isKindOfClass:NSString.class]) continue;
+        App *f = [App new]; f->file = YES; f->path = path; f->name = path.lastPathComponent;
+        NSMutableArray *bits = [NSMutableArray arrayWithObject:path.stringByDeletingLastPathComponent.stringByAbbreviatingWithTildeInPath];
+        NSString *where = digupWhere(h); if (where) [bits addObject:where];
+        NSString *ex = [h[@"excerpt"] isKindOfClass:NSString.class] ? trim([[[h[@"excerpt"] stringByReplacingOccurrencesOfString:@"\n" withString:@" "]
+                    stringByReplacingOccurrencesOfString:@"«" withString:@""] stringByReplacingOccurrencesOfString:@"»" withString:@""]) : nil;
+        if (ex.length) [bits addObject:[NSString stringWithFormat:@"“%@”", ex]];
+        Item *it = mkItem(K_FILE, f->name, [bits componentsJoinedByString:@"  ·  "], nil, ([h[@"kind"] isKindOfClass:NSString.class] ? kinds[h[@"kind"]] : nil));
+        it->app = f;
+        [out addObject:it];
+    }
+    if ([msg[@"warning"] isKindOfClass:NSString.class]) fileNote = [@"DigUp: " stringByAppendingString:msg[@"warning"]];
+    if (byMeaning || out.count || !fileRows.count) fileRows = out;   // keep keyword hits up until meaning results land
+    searching = !byMeaning;
+    [self refresh];
 }
 - (void)revealSelected {
     if (sel < 0 || sel >= (int)rows.count || rows[sel]->kind != K_FILE) return;
@@ -1617,6 +1790,7 @@ static int fileNameRank(NSString *name, NSArray<NSString *> *words) {
     case 53: if (fileMode) { [self leaveFileMode]; [self refresh]; } else [self hide]; return YES;   // esc leaves file search first
     case 36: case 76: if (m == NSEventModifierFlagCommand) [self revealSelected]; else [self activateSelected]; return YES;
     case 51: if (fileMode && !m && !field.stringValue.length) { [self leaveFileMode]; [self refresh]; return YES; } break;
+    case 48: if (fileMode && !m) { [self switchProvider]; return YES; } break;   // ⇥ switches file search provider
     case 125: [self moveSel:1]; return YES;
     case 126: [self moveSel:-1]; return YES;
     }
@@ -1640,6 +1814,7 @@ static int fileNameRank(NSString *name, NSArray<NSString *> *words) {
 #pragma mark - entry points (called by core.m)
 
 void uiRun(void) {
+    signal(SIGPIPE, SIG_IGN);   // writing to a DigUp helper that exited must not kill rayfast
     NSApplication *app = NSApplication.sharedApplication;
     app.activationPolicy = NSApplicationActivationPolicyAccessory;
     gR = [R new];

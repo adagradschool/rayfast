@@ -19,13 +19,28 @@ make uninstall
 | `↩` | open app / copy answer |
 | `⌘K` on an app | record a global hotkey for it (`⌫` removes, `esc` cancels). Pressing an app's hotkey while it's frontmost hides it |
 | `⌘,` | edit `~/.config/rayfast/config` |
-| Search Files | always the last row (selected when nothing else matches): Spotlight file search in your home folder. `↩` opens, `⌘↩` shows in Finder, `esc` goes back |
+| Search Files | always the last row (selected when nothing else matches). `↩` opens, `⌘↩` shows in Finder, `⇥` switches provider, `esc` goes back |
 
 Conversions: `5 km to mi`, `72f`, `3 cups in ml`, `1 gib in mb`, `100 usd to inr`, `€50`, `20% of 150`,
 `sqrt(2)*pi`, `time in nyc`, `london time`, `3pm pst to ist`, `noon tokyo to nyc`, `10am IST to CET`, `10 ist to cet`,
 `ist to cet` (now), `1500 utc to jst`, `10am ind to amsterdam`, `9am pst to utc-3:30`, `10am ist to cet tomorrow`.
 Time zones accept abbreviations (shown back as typed, switched to CEST/PDT etc. when daylight time applies), any
 country or zone city by name, and unique prefixes (`ams`, `sing`).
+### File search providers
+
+Set `files =` in the config, or press `⇥` in the file results (the choice is saved), or run the
+"Use DigUp/Spotlight for File Search" command:
+
+- `spotlight`: file names in your home folder, through `/usr/bin/mdfind`. Skips `~/Library`, hidden folders, apps and
+  dependency folders; names that start with the query first, then recently opened.
+- `digup`: what's *in* your files (photos, PDFs, documents, recordings, video, code) through
+  [DigUp](https://github.com/ARahim3/DigUp)'s on-device EmbeddingGemma model: "a penguin", "the pets clause in the
+  lease", "where we talked about backoff". rayfast runs DigUp's bundled `digup search-service` helper for the
+  launcher session and searches the folders you chose in DigUp (it reads DigUp's own settings). Keyword matches show
+  at once, meaning matches replace them a moment later. The helper is a separate process (~250 MB while its
+  model is loaded) and stops when the launcher hides, so rayfast's own footprint doesn't change.
+- `auto` (default): DigUp once it's installed and has folders, otherwise Spotlight.
+
 Exchange rates come from open.er-api.com (fetched by `/usr/bin/curl`, cached 6h in `~/Library/Caches`).
 
 ## Numbers
@@ -72,7 +87,8 @@ Code: `core.m` (config, hotkeys, launching, respawn, `main`), `ui.m` (window, re
 ## Testing hooks
 
 `kill -USR1 <pid>` toggles the launcher. Environment variables: `RF_CONFIG_DIR` (another config dir),
-`RF_NOHOTKEY=1` (register no hotkeys) with `RF_TOGGLE=hyper+9` (a private toggle), `RF_DEBUG=1` (log hotkey→commit
+`RF_DIGUP=/path/digup`, `RF_DIGUP_roots=a:b` and `RF_DIGUP_indexDir=…` (a DigUp helper, folders and index other than
+DigUp's own; a missing path acts as "not installed"), `RF_NOHOTKEY=1` (register no hotkeys) with `RF_TOGGLE=hyper+9` (a private toggle), `RF_DEBUG=1` (log hotkey→commit
 latency to stderr), `RF_SNAP=/path/x` (`kill -USR2` renders the window with the query in `/path/x.q` to
 `/path/x.png`; `query|down|enter|cmdk|nopng` steps through it, and `@same` re-renders the current state). `rayfast --eval "5 km to mi"` runs the conversion engine from the command line.
 

@@ -8,6 +8,7 @@
 // ---- core.m
 extern NSMutableArray<Binding *> *gBinds;
 extern Binding *gToggle;
+extern NSString *gFiles;   // Search Files provider: "auto" (DigUp when installed, else Spotlight), "spotlight" or "digup"
 extern uint64_t gHotkeyAt;
 NSString *cfgDir(void);
 NSString *cfgPath(void);
