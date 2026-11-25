@@ -810,6 +810,7 @@ static NSString *gPlaceholder = @"Search for apps and conversions…";
     App *recording; BOOL hiding;
     BOOL fileMode, searching; NSString *fileQuery; NSArray<Item *> *fileRows; NSTask *mdTask; int fileGen;   // file search
     BOOL dig; NSString *fileNote; NSTask *dgTask; NSFileHandle *dgIn;                                     // DigUp provider
+    BOOL setupMode; NSTask *installTask; NSString *setupNote;                                            // DigUp setup
     double lastScan;
 }
 - (BOOL)handleKey:(NSEvent *)e;
@@ -822,6 +823,7 @@ static NSString *gPlaceholder = @"Search for apps and conversions…";
 @end
 static R *gR;
 static NSString *digupBinary(void);
+static NSArray<NSString *> *digupPref(NSString *key);
 
 static CGFloat rowHeight(Item *it) { return it->kind == K_HEADER ? HH : (it->kind == K_CALC || it->kind == K_INFO) ? CH : RH; }
 
@@ -1074,7 +1076,7 @@ static void needsRender(void) {
     Item *it = (gR->sel >= 0 && gR->sel < (int)gR->rows.count) ? gR->rows[gR->sel] : nil;
     NSString *status = gR->recording ? @"Recording hotkey…" : gFetching ? @"Updating exchange rates…"
                      : gR->searching ? (gR->dig ? (gR->fileRows.count ? @"Searching by meaning…" : @"Searching…") : @"Searching files…") : nil;
-    if (!status && gR->fileMode && digupBinary()) status = gR->dig ? @"⇥  Spotlight" : @"⇥  DigUp";
+    if (!status && gR->fileMode) status = gR->dig ? @"⇥  Spotlight" : digupBinary() && digupPref(@"roots").count ? @"⇥  DigUp" : @"⇥  Search inside files with DigUp";
     if (status) [status drawAtPoint:NSMakePoint(40, mid - 8) withAttributes:dim];
     // right: primary action ↩ | secondary action ⌘K
     CGFloat x = W - 14;
@@ -1190,7 +1192,7 @@ static void scanDir(NSMutableArray *out, NSMutableSet *seen, const char *dir, in
     q = [q stringByTrimmingCharactersInSet:NSCharacterSet.newlineCharacterSet];
     NSArray *parts = [q componentsSeparatedByString:@"|"];           // "query|down|down|cmdk|enter"
     if (![parts[0] isEqual:@"@same"]) {   // "@same" re-renders the current state (e.g. after async file results)
-        [self leaveFileMode];
+        [self leaveFileMode]; setupMode = NO;
         field.stringValue = parts[0];
         [self refresh];
     }
@@ -1252,7 +1254,7 @@ static void scanDir(NSMutableArray *out, NSMutableSet *seen, const char *dir, in
     chrome = [[Chrome alloc] initWithFrame:NSMakeRect(0, 0, W, H)];
     field = [[QueryView alloc] initWithFrame:NSMakeRect(20, H - SH + 15, W - 40, 26)];
     __weak R *ws = self;
-    field->onChange = ^{ R *s = ws; if (s && !s->recording) [s refresh]; };
+    field->onChange = ^{ R *s = ws; if (s && !s->recording) { s->setupMode = NO; [s refresh]; } };   // typing leaves the setup screen
     [canvas addSubview:field];   // in the window for keyboard focus only; it never draws
     list = [[ListView alloc] initWithFrame:NSMakeRect(0, FT + 1, W, H - SH - FT - 1)];
     footer = [[Footer alloc] initWithFrame:NSMakeRect(0, 0, W, FT)];
@@ -1343,6 +1345,7 @@ static void drawView(NSView *v, CGContextRef c) {
     if (!apps || CFAbsoluteTimeGetCurrent() - lastScan > 30) [self scanApps];
     recording = nil;
     [self leaveFileMode];
+    setupMode = NO; setupNote = nil;
     field.stringValue = @"";
     [self refresh];
     [self render];
@@ -1407,6 +1410,24 @@ static void drawView(NSView *v, CGContextRef c) {
     NSString *q = field.stringValue;
     NSMutableArray<Item *> *out = [NSMutableArray array];
     const char *lq = trim(q.lowercaseString).UTF8String;
+    if (setupMode) {
+        BOOL installed = digupBinary() != nil;
+        Item *card = mkCalc(@"Search inside files", @"photos, PDFs, documents, recordings, video",
+                            @"DigUp", installed ? @"installed · choose its folders to finish" : @"free, on-device · 9 MB app + 865 MB model", nil);
+        card->kind = K_INFO;
+        [out addObject:mkItem(K_HEADER, setupNote ?: @"Set Up DigUp", nil, nil, nil)];
+        [out addObject:card];
+        Item *go = installed ? mkItem(K_ACTION, @"Open DigUp to Choose Folders", @"then Search Files uses it", nil, @"⌕")
+                 : installTask.running ? mkItem(K_ACTION, @"Installing…", @"from github.com/ARahim3/DigUp", nil, @"⌕")
+                 : mkItem(K_ACTION, @"Install DigUp", @"from github.com/ARahim3/DigUp · then pick folders in it", nil, @"⌕");
+        go->action = installed ? @selector(openDigup) : installTask.running ? NULL : @selector(installDigup);
+        [out addObject:go];
+        Item *no = mkItem(K_ACTION, @"Not Now", @"Search Files keeps using Spotlight", nil, @"✦"); no->action = @selector(cancelSetup);
+        [out addObject:no];
+        rows = out; sel = 2; list->off = 0;
+        [self redraw];
+        return;
+    }
     if (fileMode) {
         [self searchFiles:trim(q)];
         NSString *src = dig ? @"DigUp" : @"Spotlight";
@@ -1440,11 +1461,13 @@ static void drawView(NSView *v, CGContextRef c) {
             {"Edit Config", "rayfast", "rayfast config settings hotkeys preferences", @selector(openConfig)},
             {"Quit", "rayfast", "quit rayfast exit", @selector(quit)},
             {"Use DigUp for File Search", "rayfast", "digup file search provider contents meaning", @selector(useDigupForFiles)},
-            {"Use Spotlight for File Search", "rayfast", "spotlight file search provider names", @selector(useSpotlightForFiles)}};
+            {"Use Spotlight for File Search", "rayfast", "spotlight file search provider names", @selector(useSpotlightForFiles)},
+            {"Set Up DigUp", "search inside files", "set up setup digup install search inside files contents", @selector(showDigupSetup)}};
         for (size_t i = 0; i < sizeof acts / sizeof *acts; i++) {
             if (strlen(lq) < 3 || !strstr(acts[i].kw, lq)) continue;
             if (acts[i].sel == @selector(useDigupForFiles) && (!digupBinary() || [gFiles isEqual:@"digup"])) continue;
             if (acts[i].sel == @selector(useSpotlightForFiles) && [gFiles isEqual:@"spotlight"]) continue;
+            if (acts[i].sel == @selector(showDigupSetup) && digupBinary() && digupPref(@"roots").count) continue;   // already set up
             if (!header) { [out addObject:mkItem(K_HEADER, @"Results", nil, nil, nil)]; header = YES; }
             Item *it = mkItem(K_ACTION, @(acts[i].t), @(acts[i].s), nil, @"✦"); it->action = acts[i].sel;
             [out addObject:it];
@@ -1501,7 +1524,7 @@ static BOOL wantDigup(void) {
 }
 // ⇥ in file results: the other provider, remembered in the config
 - (void)switchProvider {
-    if (!digupBinary()) { NSBeep(); return; }
+    if (!digupBinary() || (!dig && !digupPref(@"roots").count)) { [self showDigupSetup]; return; }   // not set up yet: offer it
     gFiles = dig ? @"spotlight" : @"digup";
     rfSaveConfig();
     NSString *q = field.stringValue;
@@ -1601,6 +1624,60 @@ static int fileNameRank(NSString *name, NSArray<NSString *> *words) {
         });
     });
 }
+#pragma mark DigUp setup
+// One screen, one key: ↩ installs DigUp from its GitHub release (signature and developer team checked) and opens it;
+// DigUp's own onboarding then downloads its model and asks which folders to read. rayfast's `files = auto` switches
+// to DigUp by itself once it has folders. Already installed but not set up: ↩ just opens DigUp.
+static const char *DIGUP_INSTALL_SH =
+    "log=\"$HOME/Library/Caches/rayfast-digup-install.log\"; exec >\"$log\" 2>&1; set -u\n"
+    "fail() { echo \"FAILED: $1\"; osascript -e \"display notification \\\"$1. Details: ~/Library/Caches/rayfast-digup-install.log\\\" with title \\\"rayfast couldn't install DigUp\\\"\"; exit 1; }\n"
+    "api=$(curl -fsSL -m 20 https://api.github.com/repos/ARahim3/DigUp/releases/latest) || fail \"GitHub couldn't be reached\"\n"
+    "url=$(printf '%s' \"$api\" | grep -o 'https://github.com/ARahim3/DigUp/releases/download/[^\"]*\\.dmg' | head -1)\n"
+    "[ -n \"$url\" ] || fail \"No DigUp download in its latest release\"\n"
+    "tmp=$(mktemp -d); mnt=\"$tmp/mnt\"; mkdir \"$mnt\"\n"
+    "trap 'hdiutil detach \"$mnt\" -quiet 2>/dev/null; rm -rf \"$tmp\"' EXIT\n"
+    "echo \"downloading $url\"; curl -fsSL -m 600 -o \"$tmp/DigUp.dmg\" \"$url\" || fail \"The download failed\"\n"
+    "hdiutil attach -nobrowse -readonly -mountpoint \"$mnt\" \"$tmp/DigUp.dmg\" >/dev/null || fail \"The disk image didn't open\"\n"
+    "app=\"$mnt/DigUp.app\"; [ -d \"$app\" ] || fail \"No DigUp.app in the disk image\"\n"
+    "codesign --verify --deep --strict \"$app\" || fail \"DigUp's signature didn't verify\"\n"
+    "codesign -dv \"$app\" 2>&1 | grep -qx 'TeamIdentifier=AXJ3D85GPJ' || fail \"The app isn't signed by DigUp's developer\"\n"
+    "dest=\"${RF_DIGUP_DEST:-/Applications}\"; [ -w \"$dest\" ] || { dest=\"$HOME/Applications\"; mkdir -p \"$dest\"; }\n"
+    "rm -rf \"$dest/DigUp.app\"; ditto \"$app\" \"$dest/DigUp.app\" || fail \"DigUp couldn't be copied to $dest\"\n"
+    "echo \"installed to $dest\"; [ -n \"${RF_DIGUP_NOOPEN:-}\" ] || open \"$dest/DigUp.app\"\n";
+- (void)showDigupSetup {
+    [self leaveFileMode];
+    setupMode = YES; setupNote = nil;
+    [self refresh];
+}
+- (void)installDigup {
+    if (installTask.running) return;
+    NSTask *t = [NSTask new];
+    t.executableURL = [NSURL fileURLWithPath:@"/bin/sh"];
+    t.arguments = @[@"-c", @(DIGUP_INSTALL_SH)];
+    t.standardInput = t.standardOutput = t.standardError = NSFileHandle.fileHandleWithNullDevice;
+    __weak R *ws = self;
+    t.terminationHandler = ^(NSTask *ended) {   // survives a hide/respawn (the script carries on, and notifies on failure)
+        int st = ended.terminationStatus;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            R *s = ws; if (!s) return;
+            s->installTask = nil;
+            s->setupNote = st ? @"Install failed: see ~/Library/Caches/rayfast-digup-install.log" : @"Installed: DigUp is opening to choose folders";
+            if (s->setupMode && s->shown) [s refresh];
+        });
+    };
+    if (![t launchAndReturnError:nil]) { setupNote = @"Couldn't start the installer"; [self refresh]; return; }
+    installTask = t;
+    setupNote = @"Downloading DigUp (9 MB)… it opens when it's ready";
+    [self refresh];
+}
+- (void)openDigup {
+    [self hide];
+    NSString *bin = digupBinary();
+    NSString *app = bin.stringByDeletingLastPathComponent.stringByDeletingLastPathComponent.stringByDeletingLastPathComponent;
+    [NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:app]];
+}
+- (void)cancelSetup { setupMode = NO; [self refresh]; }
+
 #pragma mark DigUp
 // DigUp (github.com/ARahim3/DigUp) searches files by what's in them with an on-device embedding model. Its app ships
 // a `digup search-service` helper that speaks JSON lines over stdin/stdout: rayfast runs it as a child process for the
@@ -1734,7 +1811,7 @@ static NSString *digupWhere(NSDictionary *h) {
         [NSPasteboard.generalPasteboard clearContents];
         [NSPasteboard.generalPasteboard setString:it->copy ?: it->title forType:NSPasteboardTypeString];
         [self hide]; break;
-    case K_ACTION: { SEL s = it->action; [self performSelector:s withObject:nil afterDelay:0]; break; }
+    case K_ACTION: { SEL s = it->action; if (s) [self performSelector:s withObject:nil afterDelay:0]; break; }
     case K_FILE: { NSURL *u = [NSURL fileURLWithPath:it->app->path]; [self hide]; [NSWorkspace.sharedWorkspace openURL:u]; break; }
     default: break;
     }
@@ -1787,7 +1864,7 @@ static NSString *digupWhere(NSDictionary *h) {
     if (recording) { [self finishRecording:e]; return YES; }
     NSEventModifierFlags m = e.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagOption | NSEventModifierFlagControl | NSEventModifierFlagShift);
     switch (e.keyCode) {
-    case 53: if (fileMode) { [self leaveFileMode]; [self refresh]; } else [self hide]; return YES;   // esc leaves file search first
+    case 53: if (setupMode) [self cancelSetup]; else if (fileMode) { [self leaveFileMode]; [self refresh]; } else [self hide]; return YES;   // esc backs out first
     case 36: case 76: if (m == NSEventModifierFlagCommand) [self revealSelected]; else [self activateSelected]; return YES;
     case 51: if (fileMode && !m && !field.stringValue.length) { [self leaveFileMode]; [self refresh]; return YES; } break;
     case 48: if (fileMode && !m) { [self switchProvider]; return YES; } break;   // ⇥ switches file search provider

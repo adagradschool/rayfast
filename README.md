@@ -41,6 +41,13 @@ Set `files =` in the config, or press `⇥` in the file results (the choice is s
   model is loaded) and stops when the launcher hides, so rayfast's own footprint doesn't change.
 - `auto` (default): DigUp once it's installed and has folders, otherwise Spotlight.
 
+**Setting up DigUp** takes one key: press `⇥` in the file results (or run "Set Up DigUp"), then `↩`. rayfast downloads
+the latest DigUp release from its GitHub page, checks that it's notarized and signed by DigUp's developer (team
+`AXJ3D85GPJ`), copies it to /Applications (or ~/Applications) and opens it; DigUp's own window then downloads its
+model and asks which folders to read. With `files = auto` nothing else is needed: Search Files switches to DigUp once
+those folders are chosen. If something fails you get a notification, and the details are in
+`~/Library/Caches/rayfast-digup-install.log`.
+
 Exchange rates come from open.er-api.com (fetched by `/usr/bin/curl`, cached 6h in `~/Library/Caches`).
 
 ## Numbers
@@ -88,7 +95,8 @@ Code: `core.m` (config, hotkeys, launching, respawn, `main`), `ui.m` (window, re
 
 `kill -USR1 <pid>` toggles the launcher. Environment variables: `RF_CONFIG_DIR` (another config dir),
 `RF_DIGUP=/path/digup`, `RF_DIGUP_roots=a:b` and `RF_DIGUP_indexDir=…` (a DigUp helper, folders and index other than
-DigUp's own; a missing path acts as "not installed"), `RF_NOHOTKEY=1` (register no hotkeys) with `RF_TOGGLE=hyper+9` (a private toggle), `RF_DEBUG=1` (log hotkey→commit
+DigUp's own; a missing path acts as "not installed"), `RF_DIGUP_DEST` and `RF_DIGUP_NOOPEN=1` (where the installer puts
+DigUp, and not opening it), `RF_NOHOTKEY=1` (register no hotkeys) with `RF_TOGGLE=hyper+9` (a private toggle), `RF_DEBUG=1` (log hotkey→commit
 latency to stderr), `RF_SNAP=/path/x` (`kill -USR2` renders the window with the query in `/path/x.q` to
 `/path/x.png`; `query|down|enter|cmdk|nopng` steps through it, and `@same` re-renders the current state). `rayfast --eval "5 km to mi"` runs the conversion engine from the command line.
 
