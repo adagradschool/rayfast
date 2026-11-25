@@ -309,8 +309,8 @@ static NSString *localCurrency(void) {
 
 #pragma mark - results
 
-enum { K_HEADER, K_APP, K_CALC, K_INFO, K_ACTION };
-@interface App : NSObject { @public NSString *name, *path; char lname[128]; int uses; id icon; /* CGImageRef */ }
+enum { K_HEADER, K_APP, K_CALC, K_INFO, K_ACTION, K_FILE };
+@interface App : NSObject { @public NSString *name, *path; char lname[128]; int uses; id icon; /* CGImageRef */ BOOL file, dir; }
 @end
 @implementation App
 @end
@@ -674,6 +674,7 @@ static const int MAXAPPS = 40;
 static void needsRender(void);
 // A one-line text input that implements NSTextInputClient itself. NSTextField would build a full TextKit
 // field editor, which was ~30 ms of a cold first show; this keeps IME / dead keys / emoji working without it.
+static NSString *gPlaceholder = @"Search for apps and conversions…";
 @interface QueryView : NSView <NSTextInputClient> {
 @public
     NSMutableString *text; NSRange sel; NSString *marked;
@@ -698,7 +699,7 @@ static void needsRender(void);
     NSDictionary *a = self.attrs;
     NSString *shown = marked ? [text stringByReplacingCharactersInRange:sel withString:marked] : text;
     if (!shown.length) {
-        [@"Search for apps and conversions…" drawAtPoint:NSMakePoint(0, 1) withAttributes:@{NSFontAttributeName: a[NSFontAttributeName], NSForegroundColorAttributeName: NSColor.placeholderTextColor}];
+        [gPlaceholder drawAtPoint:NSMakePoint(0, 1) withAttributes:@{NSFontAttributeName: a[NSFontAttributeName], NSForegroundColorAttributeName: NSColor.placeholderTextColor}];
     }
     CGFloat x0 = [[shown substringToIndex:sel.location] sizeWithAttributes:a].width;
     if (sel.length && !marked) {
@@ -807,6 +808,7 @@ static void needsRender(void);
     CALayer *base, *caret, *logo; NSMutableArray<CALayer *> *iconLayers;
     NSMutableArray<App *> *apps; NSArray<Item *> *rows; int sel;
     App *recording; BOOL hiding;
+    BOOL fileMode, searching; NSString *fileQuery; NSArray<Item *> *fileRows; NSTask *mdTask; int fileGen;   // file search
     double lastScan;
 }
 - (BOOL)handleKey:(NSEvent *)e;
@@ -879,6 +881,11 @@ static CGImageRef iconImage(const uint8_t *px, BOOL copy) {
 }
 static id iconFor(App *a) {
     if (a->icon) return a->icon;
+    if (a->file) {
+        NSImage *im = [NSWorkspace.sharedWorkspace iconForFile:a->path];
+        NSRect r = NSMakeRect(0, 0, ICON_PX, ICON_PX);
+        return a->icon = (__bridge id)[im CGImageForProposedRect:&r context:nil hints:nil];
+    }
     if (!gIconIndex) mapIconCache();
     struct stat st; uint32_t mt = stat(a->path.fileSystemRepresentation, &st) ? 0 : (uint32_t)st.st_mtime;
     NSNumber *idx = gIconIndex[a->path];
@@ -1010,7 +1017,12 @@ static void needsRender(void) {
         } else {
             [NSColor.controlAccentColor setFill];
             [[NSBezierPath bezierPathWithRoundedRect:NSInsetRect(ic, 1, 1) xRadius:6 yRadius:6] fill];
-            drawCentered(it->glyph ?: @"", gly, NSMakeRect(ic.origin.x, ic.origin.y + 3, 24, 18));
+            if ([it->glyph isEqual:@"⌕"]) {   // Search Files: a drawn magnifier (the text glyph renders tiny)
+                [NSColor.whiteColor set];
+                NSBezierPath *g = [NSBezierPath bezierPathWithOvalInRect:NSMakeRect(ic.origin.x + 6.5, ic.origin.y + 6.5, 8.5, 8.5)];
+                [g moveToPoint:NSMakePoint(ic.origin.x + 13.8, ic.origin.y + 13.8)]; [g lineToPoint:NSMakePoint(ic.origin.x + 17.5, ic.origin.y + 17.5)];
+                g.lineWidth = 2; g.lineCapStyle = NSLineCapStyleRound; [g stroke];
+            } else drawCentered(it->glyph ?: @"", gly, NSMakeRect(ic.origin.x, ic.origin.y + 3, 24, 18));
         }
         // right accessory: hotkey chips for bound apps, otherwise the item type
         CGFloat right = W - 24;
@@ -1024,7 +1036,7 @@ static void needsRender(void) {
             [parts addObject:[c substringFromIndex:k]];
             for (NSString *pt in parts.reverseObjectEnumerator) right = drawKeycap(pt, right, y + h / 2) - 4;
         } else {
-            right = drawLabelRTL(it->kind == K_APP ? @"Application" : @"Command", acc, right, y + h / 2) - 12;
+            right = drawLabelRTL(it->kind == K_APP ? @"Application" : it->kind == K_FILE ? (it->app->dir ? @"Folder" : @"File") : @"Command", acc, right, y + h / 2) - 12;
         }
         NSSize ts = [it->title sizeWithAttributes:ttl];
         CGFloat tw = MIN(ts.width, right - 56);
@@ -1058,7 +1070,7 @@ static void needsRender(void) {
     NSDictionary *dim = attrs(12, NSFontWeightRegular, NSColor.secondaryLabelColor);
     // left: status (the colour logo mark is its own small layer)
     Item *it = (gR->sel >= 0 && gR->sel < (int)gR->rows.count) ? gR->rows[gR->sel] : nil;
-    NSString *status = gR->recording ? @"Recording hotkey…" : (gFetching ? @"Updating exchange rates…" : nil);
+    NSString *status = gR->recording ? @"Recording hotkey…" : gFetching ? @"Updating exchange rates…" : gR->searching ? @"Searching files…" : nil;
     if (status) [status drawAtPoint:NSMakePoint(40, mid - 8) withAttributes:dim];
     // right: primary action ↩ | secondary action ⌘K
     CGFloat x = W - 14;
@@ -1073,7 +1085,12 @@ static void needsRender(void) {
         x = drawLabelRTL([gR bindingFor:it->app->path] ? @"Change Hotkey" : @"Set Hotkey", dim, x, mid) - 10;
         [[NSColor.labelColor colorWithAlphaComponent:0.15] setFill]; NSRectFillUsingOperation(NSMakeRect(x, mid - 7, 1, 14), NSCompositingOperationSourceOver); x -= 10;
     }
-    NSString *primary = it->kind == K_APP ? @"Open Application" : it->kind == K_CALC ? @"Copy Answer" : it->kind == K_ACTION ? @"Run Command" : nil;
+    if (it->kind == K_FILE) {
+        x = drawKeycap(@"↩", x, mid) - 3; x = drawKeycap(@"⌘", x, mid) - 6;
+        x = drawLabelRTL(@"Show in Finder", dim, x, mid) - 10;
+        [[NSColor.labelColor colorWithAlphaComponent:0.15] setFill]; NSRectFillUsingOperation(NSMakeRect(x, mid - 7, 1, 14), NSCompositingOperationSourceOver); x -= 10;
+    }
+    NSString *primary = it->kind == K_APP ? @"Open Application" : it->kind == K_CALC ? @"Copy Answer" : it->kind == K_ACTION ? @"Run Command" : it->kind == K_FILE ? @"Open" : nil;
     if (primary) { x = drawKeycap(@"↩", x, mid) - 6; drawLabelRTL(primary, lbl, x, mid); }
 }
 @end
@@ -1162,12 +1179,16 @@ static void scanDir(NSMutableArray *out, NSMutableSet *seen, const char *dir, in
     if (!shown) [self show];
     NSString *q = [NSString stringWithContentsOfFile:[snapBase stringByAppendingString:@".q"] encoding:NSUTF8StringEncoding error:nil] ?: @"";
     q = [q stringByTrimmingCharactersInSet:NSCharacterSet.newlineCharacterSet];
-    NSArray *parts = [q componentsSeparatedByString:@"|"];           // "query|down|down|cmdk"
-    field.stringValue = parts[0];
-    [self refresh];
+    NSArray *parts = [q componentsSeparatedByString:@"|"];           // "query|down|down|cmdk|enter"
+    if (![parts[0] isEqual:@"@same"]) {   // "@same" re-renders the current state (e.g. after async file results)
+        [self leaveFileMode];
+        field.stringValue = parts[0];
+        [self refresh];
+    }
     for (NSString *p in [parts subarrayWithRange:NSMakeRange(1, parts.count - 1)]) {
         if ([p isEqual:@"down"]) [self moveSel:1];
         if ([p isEqual:@"cmdk"]) [self startRecording];
+        if ([p isEqual:@"enter"]) [self activateSelected];
     }
     if ([parts containsObject:@"nopng"]) return;
     [self render];
@@ -1310,6 +1331,7 @@ static void drawView(NSView *v, CGContextRef c) {
     rfReloadConfigIfChanged(); cfgSeen = mtimeOf(cfgPath());
     if (!apps || CFAbsoluteTimeGetCurrent() - lastScan > 30) [self scanApps];
     recording = nil;
+    [self leaveFileMode];
     field.stringValue = @"";
     [self refresh];
     [self render];
@@ -1373,7 +1395,11 @@ static void drawView(NSView *v, CGContextRef c) {
     NSString *q = field.stringValue;
     NSMutableArray<Item *> *out = [NSMutableArray array];
     const char *lq = trim(q.lowercaseString).UTF8String;
-    if (!*lq) {
+    if (fileMode) {
+        [self searchFiles:trim(q)];
+        [out addObject:mkItem(K_HEADER, !*lq ? @"Files" : searching && !fileRows.count ? @"Searching…" : fileRows.count ? @"Files" : @"No Files Found", nil, nil, nil)];
+        [out addObjectsFromArray:fileRows ?: @[]];
+    } else if (!*lq) {
         // empty query: most-used apps
         NSArray *top = [apps sortedArrayUsingComparator:^NSComparisonResult(App *a, App *b) {
             return a->uses != b->uses ? (a->uses > b->uses ? NSOrderedAscending : NSOrderedDescending) : [a->name localizedCaseInsensitiveCompare:b->name];
@@ -1405,12 +1431,118 @@ static void drawView(NSView *v, CGContextRef c) {
             Item *it = mkItem(K_ACTION, @(acts[i].t), @(acts[i].s), nil, @"✦"); it->action = acts[i].sel;
             [out addObject:it];
         }
+        // fallback, like Raycast's: always last, so it's the selected row when nothing else matched
+        NSString *tq = trim(q);
+        if (tq.length > 32) tq = [[tq substringToIndex:31] stringByAppendingString:@"…"];
+        [out addObject:mkItem(K_HEADER, [NSString stringWithFormat:@"Use “%@” with…", tq], nil, nil, nil)];
+        Item *fs = mkItem(K_ACTION, @"Search Files", nil, nil, @"⌕"); fs->action = @selector(enterFileMode);
+        [out addObject:fs];
     }
     rows = out;
     sel = -1;
     for (int i = 0; i < (int)rows.count; i++) if (rows[i]->kind != K_HEADER) { sel = i; break; }
     list->off = 0;
     [self redraw];
+}
+#pragma mark file search
+// Spotlight via /usr/bin/mdfind, out of process like curl: the Metadata framework never loads into rayfast.
+- (void)enterFileMode {
+    fileMode = YES; fileQuery = nil; fileRows = nil;
+    gPlaceholder = @"Search files…";
+    [self refresh];
+}
+- (void)leaveFileMode {
+    fileGen++; [mdTask terminate]; mdTask = nil;
+    fileMode = searching = NO; fileQuery = nil; fileRows = nil;
+    gPlaceholder = @"Search for apps and conversions…";
+}
+- (void)searchFiles:(NSString *)q {
+    if ([q isEqual:fileQuery]) return;
+    fileQuery = q;
+    int my = ++fileGen;
+    [mdTask terminate]; mdTask = nil;
+    if (!q.length) { fileRows = nil; searching = NO; return; }
+    searching = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{   // debounce typing
+        if (my == fileGen && fileMode) [self runMdfind:q gen:my];
+    });
+}
+// Lower is better: name starts with the query, then a word in the name does, then anywhere.
+static int fileNameRank(NSString *name, NSArray<NSString *> *words) {
+    NSString *l = name.lowercaseString; int r = 0;
+    for (NSString *w in words) {
+        NSRange f = [l rangeOfString:w];
+        if (f.location == 0) continue;
+        unichar p = f.location != NSNotFound ? [l characterAtIndex:f.location - 1] : 0;
+        r += (p == ' ' || p == '-' || p == '_' || p == '.') ? 1 : 2;
+    }
+    return r;
+}
+- (void)runMdfind:(NSString *)q gen:(int)my {
+    NSMutableArray *terms = [NSMutableArray array], *words = [NSMutableArray array];
+    for (NSString *w in [q.lowercaseString componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceCharacterSet]) {
+        if (!w.length) continue;
+        [words addObject:w];
+        NSMutableString *e = [NSMutableString string];
+        for (NSUInteger i = 0; i < w.length; i++) {
+            unichar ch = [w characterAtIndex:i];
+            if (ch == '"' || ch == '\\' || ch == '*' || ch == '\'') [e appendString:@"\\"];
+            [e appendFormat:@"%C", ch];
+        }
+        [terms addObject:[NSString stringWithFormat:@"kMDItemFSName == \"*%@*\"cd", e]];
+    }
+    NSTask *t = [NSTask new];
+    t.executableURL = [NSURL fileURLWithPath:@"/usr/bin/mdfind"];
+    t.arguments = @[@"-onlyin", NSHomeDirectory(), @"-attr", @"kMDItemLastUsedDate", [terms componentsJoinedByString:@" && "]];
+    NSPipe *pipe = [NSPipe pipe];
+    t.standardOutput = pipe; t.standardError = NSFileHandle.fileHandleWithNullDevice;
+    if (![t launchAndReturnError:nil]) { searching = NO; [self refresh]; return; }
+    mdTask = t;
+    NSString *home = NSHomeDirectory();
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        // read at most 2 MB (a one-letter query can match most of the disk), then stop mdfind
+        NSMutableData *buf = [NSMutableData data]; NSFileHandle *fh = pipe.fileHandleForReading; NSData *chunk;
+        while ((chunk = fh.availableData).length) { [buf appendData:chunk]; if (buf.length > (2 << 20)) { [t terminate]; break; } }
+        NSString *out = [[NSString alloc] initWithData:buf encoding:NSUTF8StringEncoding] ?: @"";
+        NSMutableArray *hits = [NSMutableArray array];
+        NSDateFormatter *df = [NSDateFormatter new]; df.dateFormat = @"yyyy-MM-dd HH:mm:ss Z"; df.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+        for (NSString *line in [out componentsSeparatedByString:@"\n"]) {
+            NSRange a = [line rangeOfString:@"   kMDItemLastUsedDate = " options:NSBackwardsSearch];
+            NSString *path = a.location == NSNotFound ? line : [line substringToIndex:a.location];
+            if (!path.length || ![path hasPrefix:home]) continue;
+            NSString *rel = [path substringFromIndex:home.length];
+            if ([rel hasPrefix:@"/Library/"] || [rel containsString:@"/."] || [rel containsString:@"/node_modules/"] || [rel containsString:@"/vendor/"] ||
+                [rel containsString:@"/site-packages/"] || [rel containsString:@"/Pods/"] ||
+                [rel containsString:@".app/"] || [rel hasSuffix:@".app"]) continue;
+            NSDate *used = a.location == NSNotFound ? nil : [df dateFromString:[line substringFromIndex:NSMaxRange(a)]];
+            [hits addObject:@[@(fileNameRank(path.lastPathComponent, words)), @(-(used ? used.timeIntervalSince1970 : 0)), @(path.length), path]];
+        }
+        [hits sortUsingComparator:^NSComparisonResult(NSArray *x, NSArray *y) {
+            for (int i = 0; i < 3; i++) { NSComparisonResult r = [x[i] compare:y[i]]; if (r) return r; }
+            return NSOrderedSame;
+        }];
+        if (hits.count > 50) [hits removeObjectsInRange:NSMakeRange(50, hits.count - 50)];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (my != fileGen || !fileMode) return;
+            NSMutableArray *rowsOut = [NSMutableArray array];
+            for (NSArray *h in hits) {
+                NSString *path = h[3];
+                App *f = [App new]; f->file = YES; f->path = path; f->name = path.lastPathComponent;
+                BOOL isDir = NO; [NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&isDir]; f->dir = isDir;
+                Item *it = mkItem(K_FILE, f->name, path.stringByDeletingLastPathComponent.stringByAbbreviatingWithTildeInPath, nil, nil);
+                it->app = f;
+                [rowsOut addObject:it];
+            }
+            fileRows = rowsOut; searching = NO; mdTask = nil;
+            [self refresh];
+        });
+    });
+}
+- (void)revealSelected {
+    if (sel < 0 || sel >= (int)rows.count || rows[sel]->kind != K_FILE) return;
+    NSURL *u = [NSURL fileURLWithPath:rows[sel]->app->path];
+    [self hide];
+    [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[u]];
 }
 - (void)openConfig { [self hide]; [NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:cfgPath()]]; }
 - (void)quit { [NSApp terminate:nil]; }
@@ -1425,6 +1557,7 @@ static void drawView(NSView *v, CGContextRef c) {
         [NSPasteboard.generalPasteboard setString:it->copy ?: it->title forType:NSPasteboardTypeString];
         [self hide]; break;
     case K_ACTION: { SEL s = it->action; [self performSelector:s withObject:nil afterDelay:0]; break; }
+    case K_FILE: { NSURL *u = [NSURL fileURLWithPath:it->app->path]; [self hide]; [NSWorkspace.sharedWorkspace openURL:u]; break; }
     default: break;
     }
 }
@@ -1476,8 +1609,9 @@ static void drawView(NSView *v, CGContextRef c) {
     if (recording) { [self finishRecording:e]; return YES; }
     NSEventModifierFlags m = e.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagOption | NSEventModifierFlagControl | NSEventModifierFlagShift);
     switch (e.keyCode) {
-    case 53: [self hide]; return YES;
-    case 36: case 76: [self activateSelected]; return YES;
+    case 53: if (fileMode) { [self leaveFileMode]; [self refresh]; } else [self hide]; return YES;   // esc leaves file search first
+    case 36: case 76: if (m == NSEventModifierFlagCommand) [self revealSelected]; else [self activateSelected]; return YES;
+    case 51: if (fileMode && !m && !field.stringValue.length) { [self leaveFileMode]; [self refresh]; return YES; } break;
     case 125: [self moveSel:1]; return YES;
     case 126: [self moveSel:-1]; return YES;
     }

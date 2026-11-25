@@ -19,6 +19,7 @@ make uninstall
 | `↩` | open app / copy answer |
 | `⌘K` on an app | record a global hotkey for it (`⌫` removes, `esc` cancels). Pressing an app's hotkey while it's frontmost hides it |
 | `⌘,` | edit `~/.config/rayfast/config` |
+| Search Files | always the last row (selected when nothing else matches): Spotlight file search in your home folder. `↩` opens, `⌘↩` shows in Finder, `esc` goes back |
 
 Conversions: `5 km to mi`, `72f`, `3 cups in ml`, `1 gib in mb`, `100 usd to inr`, `€50`, `20% of 150`,
 `sqrt(2)*pi`, `time in nyc`, `london time`, `3pm pst to ist`, `noon tokyo to nyc`, `10am IST to CET`, `10 ist to cet`,
@@ -61,7 +62,8 @@ delivery; rayfast's own work is ~3 ms of it.
   `mmap()`ed read-only: file-backed pages don't count toward the footprint, and IconServices only loads for apps
   that aren't cached yet (or have changed).
 - **Global hotkeys** use Carbon's `RegisterEventHotKey` (no Accessibility permission). App launching goes through
-  LaunchServices; networking stays out of process (`curl`), so CFNetwork never loads.
+  LaunchServices; networking stays out of process (`curl`), so CFNetwork never loads. File search runs
+  `/usr/bin/mdfind` the same way, so the Spotlight/Metadata frameworks never load either.
 - **`MallocSpaceEfficient=1`** (set by re-execing once at startup) trims ~1 MB of allocator slack.
 
 Code: `core.m` (config, hotkeys, launching, respawn, `main`), `ui.m` (window, renderer, search, conversions),
@@ -72,7 +74,7 @@ Code: `core.m` (config, hotkeys, launching, respawn, `main`), `ui.m` (window, re
 `kill -USR1 <pid>` toggles the launcher. Environment variables: `RF_CONFIG_DIR` (another config dir),
 `RF_NOHOTKEY=1` (register no hotkeys) with `RF_TOGGLE=hyper+9` (a private toggle), `RF_DEBUG=1` (log hotkey→commit
 latency to stderr), `RF_SNAP=/path/x` (`kill -USR2` renders the window with the query in `/path/x.q` to
-`/path/x.png`). `rayfast --eval "5 km to mi"` runs the conversion engine from the command line.
+`/path/x.png`; `query|down|enter|cmdk|nopng` steps through it, and `@same` re-renders the current state). `rayfast --eval "5 km to mi"` runs the conversion engine from the command line.
 
 `make test-app` builds a separately named copy (`rayfast-test`) so tests never touch the running instance.
 `tests/lat.sh` measures resting memory and in-process latency, `tests/active.sh` the open window.
