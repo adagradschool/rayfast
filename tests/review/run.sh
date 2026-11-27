@@ -170,4 +170,14 @@ k5() {
 }
 k5
 
+# u1 (crash) ui.m rowKey: every key press looked up the selected row's Cmd->keys; on a row that isn't a module's
+# (an app, a conversion) or with no rows, that read a field of nil: typing anything in the real launcher was a SIGSEGV.
+u1() {
+    rf_start
+    rf_snap "1+1|key=s" >/dev/null; rf_snap "zzzznothingmatches|key=s" >/dev/null; rf_snap "|key=s" >/dev/null
+    local ok=1; kill -0 $RF_PID 2>/dev/null || ok=0
+    rf_stop; (( ok ))
+}
+finding u1 crash "a key press on a row that is not a module's (or on no row) crashes the launcher" u1
+
 print -r -- "open findings: $open[harm] harm, $open[crash] crash, $open[wrong] wrong"

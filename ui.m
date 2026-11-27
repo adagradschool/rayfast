@@ -1956,6 +1956,7 @@ static NSString *digupWhere(NSDictionary *h) {
 // a module row's own shortcut (Cmd->keys); the row's position stays selected across the uiRefresh() it triggers
 - (BOOL)rowKey:(UInt32)k mods:(UInt32)mods {
     Cmd *c = sel >= 0 && sel < (int)rows.count ? rows[sel]->cmd : nil;
+    if (!c) return NO;   // an app row, a conversion, or no rows at all: c->keys on nil is a crash
     for (NSString *combo in c->keys) {
         UInt32 ck, cm;
         if (!parseCombo(combo, &ck, &cm) || ck != k || cm != mods) continue;
