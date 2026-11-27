@@ -91,6 +91,11 @@ delivery; rayfast's own work is ~3 ms of it.
 Code: `core.m` (config, hotkeys, launching, respawn, `main`), `ui.m` (window, renderer, search, conversions),
 `rf.h` (the interface between them).
 
+**Modules.** A feature can live in its own `.m` file (the Makefile builds every `*.m`): it registers an `RFModule`
+with `RF_MODULE` and hands the launcher rows (`Cmd`) for a root query, or a whole `View` of its own, without touching
+`ui.m`. A row with an id can be bound to a global hotkey with `⌘K` (`ctrl+opt+left = cmd:window.left-half` in the
+config), and `<module>.<name> = value` config lines are that module's settings. The interface is in `rf.h`.
+
 ## Testing hooks
 
 `kill -USR1 <pid>` toggles the launcher. Environment variables: `RF_CONFIG_DIR` (another config dir),
@@ -98,7 +103,10 @@ Code: `core.m` (config, hotkeys, launching, respawn, `main`), `ui.m` (window, re
 DigUp's own; a missing path acts as "not installed"), `RF_DIGUP_DEST` and `RF_DIGUP_NOOPEN=1` (where the installer puts
 DigUp, and not opening it), `RF_NOHOTKEY=1` (register no hotkeys) with `RF_TOGGLE=hyper+9` (a private toggle), `RF_DEBUG=1` (log hotkey→commit
 latency to stderr), `RF_SNAP=/path/x` (`kill -USR2` renders the window with the query in `/path/x.q` to
-`/path/x.png`; `query|down|enter|cmdk|nopng` steps through it, and `@same` re-renders the current state). `rayfast --eval "5 km to mi"` runs the conversion engine from the command line.
+`/path/x.png` and, as text, to `/path/x.txt`; `query|down|up|enter|cmdenter|esc|cmdk|q=more|cmd=<cid>|key=<combo>|nopng` steps through it (`cmd=` runs a module command as its hotkey would, `key=cmd+shift+p` presses one of the selected row's `Cmd->keys`), and
+`@same` re-renders the current state), `RF_HEADLESS=1` (everything but the window: nothing appears on screen and focus
+stays where it is), `RF_DATA_DIR` (another folder for modules' state). `rayfast --run <module> args…` calls a module's
+command-line entry. `rayfast --eval "5 km to mi"` runs the conversion engine from the command line.
 
 `make test-app` builds a separately named copy (`rayfast-test`) so tests never touch the running instance.
 `tests/lat.sh` measures resting memory and in-process latency, `tests/active.sh` the open window.

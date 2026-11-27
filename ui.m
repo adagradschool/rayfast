@@ -315,12 +315,27 @@ enum { K_HEADER, K_APP, K_CALC, K_INFO, K_ACTION, K_FILE };
 @implementation App
 @end
 // K_CALC renders as a two-sided card: lhs/lhsCap  →  title/sub
-@interface Item : NSObject { @public int kind; NSString *title, *sub, *copy, *glyph, *lhs, *lhsCap; App *app; SEL action; }
+@interface Item : NSObject { @public int kind; NSString *title, *sub, *copy, *glyph, *lhs, *lhsCap; App *app; SEL action; Cmd *cmd; }
 @end
 @implementation Item
 @end
 static Item *mkItem(int kind, NSString *title, NSString *sub, NSString *copy, NSString *glyph) {
     Item *i = [Item new]; i->kind = kind; i->title = title; i->sub = sub; i->copy = copy; i->glyph = glyph; return i;
+}
+// modules (rf.h): rows come from other files as Cmds and are shown as K_ACTION items
+@implementation Cmd
+@end
+@implementation View
+@end
+static const RFModule *gMods[32]; static int gModN;
+void rfAddModule(const RFModule *m) { if (gModN < 32) gMods[gModN++] = m; }
+Cmd *mkCmd(NSString *cid, NSString *title, NSString *sub, NSString *glyph, void (^run)(BOOL alt)) {
+    Cmd *c = [Cmd new]; c->cid = cid; c->title = title; c->sub = sub; c->glyph = glyph; c->run = run; return c;
+}
+static Item *cmdItem(Cmd *c) { Item *i = mkItem(K_ACTION, c->title ?: @"", c->sub, nil, c->glyph ?: @"✦"); i->cmd = c; return i; }
+// what ⌘K binds for this row: an app path, or cmd:<cid> for a module command
+static NSString *bindTarget(Item *it) {
+    return it->kind == K_APP ? it->app->path : it->cmd && it->cmd->cid ? [@"cmd:" stringByAppendingString:it->cmd->cid] : nil;
 }
 static Item *mkCalc(NSString *lhs, NSString *lhsCap, NSString *rhs, NSString *rhsCap, NSString *copy) {
     Item *i = mkItem(K_CALC, rhs, rhsCap, copy, nil); i->lhs = lhs; i->lhsCap = lhsCap; return i;
@@ -675,6 +690,8 @@ static void needsRender(void);
 // A one-line text input that implements NSTextInputClient itself. NSTextField would build a full TextKit
 // field editor, which was ~30 ms of a cold first show; this keeps IME / dead keys / emoji working without it.
 static NSString *gPlaceholder = @"Search for apps and conversions…";
+static BOOL gSecure;   // a view asked for a password (View->secure): the text is drawn, snapshotted and copied as bullets only
+static NSString *masked(NSString *s) { return gSecure ? [@"" stringByPaddingToLength:s.length withString:@"•" startingAtIndex:0] : s; }
 @interface QueryView : NSView <NSTextInputClient> {
 @public
     NSMutableString *text; NSRange sel; NSString *marked;
@@ -692,12 +709,12 @@ static NSString *gPlaceholder = @"Search for apps and conversions…";
 - (void)changed { needsRender(); if (onChange) onChange(); }
 // Drawn by R's renderer into the window surface (this view never draws itself, so it gets no backing store).
 - (CGFloat)caretX {
-    NSString *shown = marked ? [text stringByReplacingCharactersInRange:sel withString:marked] : text;
+    NSString *shown = masked(marked ? [text stringByReplacingCharactersInRange:sel withString:marked] : text);
     return [[shown substringToIndex:sel.location + marked.length] sizeWithAttributes:self.attrs].width;
 }
 - (void)drawContent {
     NSDictionary *a = self.attrs;
-    NSString *shown = marked ? [text stringByReplacingCharactersInRange:sel withString:marked] : text;
+    NSString *shown = masked(marked ? [text stringByReplacingCharactersInRange:sel withString:marked] : text);
     if (!shown.length) {
         [gPlaceholder drawAtPoint:NSMakePoint(0, 1) withAttributes:@{NSFontAttributeName: a[NSFontAttributeName], NSForegroundColorAttributeName: NSColor.placeholderTextColor}];
     }
@@ -775,7 +792,7 @@ static NSString *gPlaceholder = @"Search for apps and conversions…";
     [self changed];
 }
 - (void)selectAll:(id)x { sel = NSMakeRange(0, text.length); needsRender(); }
-- (void)copy:(id)x { if (sel.length) { [NSPasteboard.generalPasteboard clearContents]; [NSPasteboard.generalPasteboard setString:[text substringWithRange:sel] forType:NSPasteboardTypeString]; } }
+- (void)copy:(id)x { if (sel.length && !gSecure) { [NSPasteboard.generalPasteboard clearContents]; [NSPasteboard.generalPasteboard setString:[text substringWithRange:sel] forType:NSPasteboardTypeString]; } }
 - (void)cut:(id)x { if (sel.length) { [self copy:x]; [self replace:sel with:@""]; [self changed]; } }
 - (void)paste:(id)x {
     NSString *s = [NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString];
@@ -811,6 +828,7 @@ static NSString *gPlaceholder = @"Search for apps and conversions…";
     BOOL fileMode, searching; NSString *fileQuery; NSArray<Item *> *fileRows; NSTask *mdTask; int fileGen;   // file search
     BOOL dig; NSString *fileNote; NSTask *dgTask; NSFileHandle *dgIn;                                     // DigUp provider
     BOOL setupMode; NSTask *installTask; NSString *setupNote;                                            // DigUp setup
+    View *view; int respawnGen;                                                                          // a module's view (rf.h)
     double lastScan;
 }
 - (BOOL)handleKey:(NSEvent *)e;
@@ -820,8 +838,11 @@ static NSString *gPlaceholder = @"Search for apps and conversions…";
 - (void)render;
 - (void)preShow;
 - (void)scanApps;
+- (void)closeView;
+- (void)scheduleRespawn;
 @end
 static R *gR;
+static int gBusy;   // modules' work in flight (uiBusy): no respawn meanwhile
 static NSString *digupBinary(void);
 static NSArray<NSString *> *digupPref(NSString *key);
 
@@ -859,7 +880,8 @@ static NSMutableArray *gIconSlots;   // [App, NSRect in list coords] for the ico
 #define ICON_BYTES (ICON_PX * ICON_PX * 4)
 typedef struct { char path[500]; uint32_t mtime; uint8_t px[ICON_BYTES]; } IconRec;
 static const uint8_t *gIconMap; static size_t gIconMapLen; static NSMutableDictionary<NSString *, NSNumber *> *gIconIndex;
-static NSString *iconCachePath(void) { return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Caches/rayfast-icons.bin"]; }
+// test instances (RF_DATA_DIR set) keep their own cache: parallel ones appending to the user's tore records in it
+static NSString *iconCachePath(void) { return getenv("RF_DATA_DIR") ? [rfDataDir() stringByAppendingPathComponent:@"icons.bin"] : [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Caches/rayfast-icons.bin"]; }
 static void mapIconCache(void) {
     if (gIconMap) { munmap((void *)gIconMap, gIconMapLen); gIconMap = NULL; }
     gIconIndex = [NSMutableDictionary dictionary];
@@ -867,11 +889,16 @@ static void mapIconCache(void) {
     if (fd < 0) return;
     struct stat st; fstat(fd, &st);
     size_t n = (size_t)st.st_size / sizeof(IconRec);
+    if (st.st_size % sizeof(IconRec)) { close(fd); unlink(iconCachePath().fileSystemRepresentation); return; }   // misaligned by a torn append: start over
     if (n) {
         gIconMapLen = n * sizeof(IconRec);
         gIconMap = mmap(NULL, gIconMapLen, PROT_READ, MAP_PRIVATE, fd, 0);
         if (gIconMap == MAP_FAILED) gIconMap = NULL;
-        for (size_t i = 0; gIconMap && i < n; i++) gIconIndex[@(((const IconRec *)gIconMap)[i].path)] = @(i);   // later entries win
+        for (size_t i = 0; gIconMap && i < n; i++) {   // later entries win; a torn record (no valid path) is skipped, not fatal
+            const IconRec *r = &((const IconRec *)gIconMap)[i];
+            NSString *k = memchr(r->path, 0, sizeof r->path) ? [NSString stringWithUTF8String:r->path] : nil;
+            if (k) gIconIndex[k] = @(i);
+        }
     }
     close(fd);
 }
@@ -908,8 +935,8 @@ static id iconFor(App *a) {
     [[NSWorkspace.sharedWorkspace iconForFile:a->path] drawInRect:NSMakeRect(0, 0, ICON_PX, ICON_PX)];
     [NSGraphicsContext restoreGraphicsState];
     CGContextRelease(c);
-    FILE *f = fopen(iconCachePath().fileSystemRepresentation, "ab");
-    if (f) { fwrite(r, sizeof *r, 1, f); fclose(f); }
+    int fd = open(iconCachePath().fileSystemRepresentation, O_WRONLY | O_APPEND | O_CREAT, 0644);   // one write(2), not stdio's 4-8 KB pieces
+    if (fd >= 0) { write(fd, r, sizeof *r); close(fd); }
     a->icon = CFBridgingRelease(iconImage(r->px, YES));
     free(r);
     return a->icon;
@@ -1018,6 +1045,8 @@ static void needsRender(void) {
         NSRect ic = NSMakeRect(20, y + 8, 24, 24);
         if (it->app) {
             if (y + 8 >= 0 && y + 32 <= vh) [gIconSlots addObject:@[it->app, [NSValue valueWithRect:ic]]];   // icons are colour: own layers
+        } else if (it->cmd && it->cmd->icon) {
+            if (y + 8 >= 0 && y + 32 <= vh) [gIconSlots addObject:@[it->cmd, [NSValue valueWithRect:ic]]];
         } else {
             [NSColor.controlAccentColor setFill];
             [[NSBezierPath bezierPathWithRoundedRect:NSInsetRect(ic, 1, 1) xRadius:6 yRadius:6] fill];
@@ -1030,7 +1059,8 @@ static void needsRender(void) {
         }
         // right accessory: hotkey chips for bound apps, otherwise the item type
         CGFloat right = W - 24;
-        Binding *b = it->app ? [gR bindingFor:it->app->path] : nil;
+        NSString *bt = it->app ? it->app->path : bindTarget(it);
+        Binding *b = bt ? [gR bindingFor:bt] : nil;
         if (b) {
             NSString *c = comboString(b->key, b->mods, YES);
             NSMutableArray *parts = [NSMutableArray array];
@@ -1040,7 +1070,7 @@ static void needsRender(void) {
             [parts addObject:[c substringFromIndex:k]];
             for (NSString *pt in parts.reverseObjectEnumerator) right = drawKeycap(pt, right, y + h / 2) - 4;
         } else {
-            right = drawLabelRTL(it->kind == K_APP ? @"Application" : it->kind == K_FILE ? (it->glyph ?: it->app->dir ? @"Folder" : @"File") : @"Command", acc, right, y + h / 2) - 12;
+            right = drawLabelRTL(it->kind == K_APP ? @"Application" : it->kind == K_FILE ? (it->glyph ?: it->app->dir ? @"Folder" : @"File") : it->cmd && it->cmd->type ? it->cmd->type : @"Command", acc, right, y + h / 2) - 12;
         }
         NSSize ts = [it->title sizeWithAttributes:ttl];
         CGFloat tw = MIN(ts.width, right - 56);
@@ -1076,6 +1106,7 @@ static void needsRender(void) {
     Item *it = (gR->sel >= 0 && gR->sel < (int)gR->rows.count) ? gR->rows[gR->sel] : nil;
     NSString *status = gR->recording ? @"Recording hotkey…" : gFetching ? @"Updating exchange rates…"
                      : gR->searching ? (gR->dig ? (gR->fileRows.count ? @"Searching by meaning…" : @"Searching…") : @"Searching files…") : nil;
+    if (!status && gR->view) status = gR->view->hint;
     if (!status && gR->fileMode) status = gR->dig ? @"⇥  Spotlight" : digupBinary() && digupPref(@"roots").count ? @"⇥  DigUp" : @"⇥  Search inside files with DigUp";
     if (status) [status drawAtPoint:NSMakePoint(40, mid - 8) withAttributes:dim];
     // right: primary action ↩ | secondary action ⌘K
@@ -1086,17 +1117,17 @@ static void needsRender(void) {
         return;
     }
     if (!it) return;
-    if (it->kind == K_APP) {
+    if (bindTarget(it)) {
         x = drawKeycap(@"K", x, mid) - 3; x = drawKeycap(@"⌘", x, mid) - 6;
-        x = drawLabelRTL([gR bindingFor:it->app->path] ? @"Change Hotkey" : @"Set Hotkey", dim, x, mid) - 10;
+        x = drawLabelRTL([gR bindingFor:bindTarget(it)] ? @"Change Hotkey" : @"Set Hotkey", dim, x, mid) - 10;
         [[NSColor.labelColor colorWithAlphaComponent:0.15] setFill]; NSRectFillUsingOperation(NSMakeRect(x, mid - 7, 1, 14), NSCompositingOperationSourceOver); x -= 10;
     }
-    if (it->kind == K_FILE) {
+    if (it->kind == K_FILE || (it->cmd && it->cmd->altVerb)) {
         x = drawKeycap(@"↩", x, mid) - 3; x = drawKeycap(@"⌘", x, mid) - 6;
-        x = drawLabelRTL(@"Show in Finder", dim, x, mid) - 10;
+        x = drawLabelRTL(it->cmd ? it->cmd->altVerb : @"Show in Finder", dim, x, mid) - 10;
         [[NSColor.labelColor colorWithAlphaComponent:0.15] setFill]; NSRectFillUsingOperation(NSMakeRect(x, mid - 7, 1, 14), NSCompositingOperationSourceOver); x -= 10;
     }
-    NSString *primary = it->kind == K_APP ? @"Open Application" : it->kind == K_CALC ? @"Copy Answer" : it->kind == K_ACTION ? @"Run Command" : it->kind == K_FILE ? @"Open" : nil;
+    NSString *primary = it->cmd && it->cmd->verb ? it->cmd->verb : it->kind == K_APP ? @"Open Application" : it->kind == K_CALC ? @"Copy Answer" : it->kind == K_ACTION ? @"Run Command" : it->kind == K_FILE ? @"Open" : nil;
     if (primary) { x = drawKeycap(@"↩", x, mid) - 6; drawLabelRTL(primary, lbl, x, mid); }
 }
 @end
@@ -1192,17 +1223,34 @@ static void scanDir(NSMutableArray *out, NSMutableSet *seen, const char *dir, in
     q = [q stringByTrimmingCharactersInSet:NSCharacterSet.newlineCharacterSet];
     NSArray *parts = [q componentsSeparatedByString:@"|"];           // "query|down|down|cmdk|enter"
     if (![parts[0] isEqual:@"@same"]) {   // "@same" re-renders the current state (e.g. after async file results)
-        [self leaveFileMode]; setupMode = NO;
+        [self leaveFileMode]; [self closeView]; setupMode = NO;
         field.stringValue = parts[0];
         [self refresh];
     }
     for (NSString *p in [parts subarrayWithRange:NSMakeRange(1, parts.count - 1)]) {
         if ([p isEqual:@"down"]) [self moveSel:1];
         if ([p isEqual:@"cmdk"]) [self startRecording];
+        if ([p isEqual:@"up"]) [self moveSel:-1];
         if ([p isEqual:@"enter"]) [self activateSelected];
+        if ([p isEqual:@"cmdenter"]) [self activateAlt];
+        if ([p isEqual:@"esc"]) [self back];
         if ([p isEqual:@"tab"] && fileMode) [self switchProvider];
         if ([p hasPrefix:@"q="]) { field.stringValue = [p substringFromIndex:2]; [self refresh]; }   // type, staying in file mode
+        if ([p hasPrefix:@"cmd="]) uiRunCommand([p substringFromIndex:4]);   // as if its hotkey was pressed
+        if ([p hasPrefix:@"key="]) { UInt32 k, m; if (parseCombo([p substringFromIndex:4], &k, &m)) [self rowKey:k mods:m]; }   // a row's Cmd->keys
     }
+    // the same state as text, for tests: "# header", "> selected row", "  other row", then "= footer status"
+    NSMutableString *txt = [NSMutableString stringWithFormat:@"? %@ [%@]\n", masked(field.stringValue), gPlaceholder];
+    for (int i = 0; i < (int)rows.count; i++) {
+        Item *it = rows[i];
+        if (it->kind == K_HEADER) { [txt appendFormat:@"# %@\n", it->title]; continue; }
+        [txt appendFormat:@"%@ %@%@", i == sel ? @">" : @" ", it->lhs ? [it->lhs stringByAppendingString:@" → "] : @"", it->title];
+        if (it->sub.length) [txt appendFormat:@" | %@", it->sub];
+        if (it->cmd && it->cmd->cid) [txt appendFormat:@" {%@}", it->cmd->cid];
+        [txt appendString:@"\n"];
+    }
+    if (view && view->hint) [txt appendFormat:@"= %@\n", view->hint];
+    [txt writeToFile:[snapBase stringByAppendingString:@".txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
     if ([parts containsObject:@"nopng"]) return;
     [self render];
     IOSurfaceRef s = surf[cur];
@@ -1322,7 +1370,7 @@ static void drawView(NSView *v, CGContextRef c) {
         CALayer *l = iconLayers[n++];
         NSRect r = [slot[1] rectValue];   // list coords (flipped)
         l.frame = CGRectMake(lf.origin.x + r.origin.x, NSMaxY(lf) - NSMaxY(r), r.size.width, r.size.height);
-        l.contents = iconFor(slot[0]);
+        l.contents = [slot[0] isKindOfClass:Cmd.class] ? ((Cmd *)slot[0])->icon : iconFor(slot[0]);
         l.hidden = NO;
     }
     for (; n < iconLayers.count; n++) iconLayers[n].hidden = YES;
@@ -1344,7 +1392,7 @@ static void drawView(NSView *v, CGContextRef c) {
     rfReloadConfigIfChanged(); cfgSeen = mtimeOf(cfgPath());
     if (!apps || CFAbsoluteTimeGetCurrent() - lastScan > 30) [self scanApps];
     recording = nil;
-    [self leaveFileMode];
+    [self leaveFileMode]; [self closeView];
     setupMode = NO; setupNote = nil;
     field.stringValue = @"";
     [self refresh];
@@ -1376,10 +1424,12 @@ static void drawView(NSView *v, CGContextRef c) {
     if (![self idleIsFresh]) [self resetToIdle];   // normally already done when the window last hid
     prepared = NO;
     shown = YES;
-    NSPoint o = [self homeOrigin];
-    if (!NSEqualPoints(panel.frame.origin, o)) [panel setFrameOrigin:o];
-    [panel makeKeyAndOrderFront:nil];
-    [panel makeFirstResponder:field];
+    if (!getenv("RF_HEADLESS")) {   // tests set it: all the state and rendering, but no window on screen and no focus taken
+        NSPoint o = [self homeOrigin];
+        if (!NSEqualPoints(panel.frame.origin, o)) [panel setFrameOrigin:o];
+        [panel makeKeyAndOrderFront:nil];
+        [panel makeFirstResponder:field];
+    }
     if (getenv("RF_DEBUG")) {   // hotkey→commit latency; tests/breakdown.sh lines these up with screen captures
         [CATransaction flush];
         uint64_t now = mach_absolute_time(); mach_timebase_info_data_t tb; mach_timebase_info(&tb);
@@ -1396,10 +1446,27 @@ static void drawView(NSView *v, CGContextRef c) {
     [panel orderOut:nil];   // also hands keyboard focus back to the previous app
     hiding = NO;
     dispatch_async(dispatch_get_main_queue(), ^{ if (!shown && panel) { [self resetToIdle]; prepared = YES; } });
-    static int gen; int my = ++gen;
+    [self scheduleRespawn];
+}
+- (void)scheduleRespawn {
+    int my = ++respawnGen;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        if (my == gen && !shown && !gFetching) rfRespawn();
+        if (my == respawnGen && !shown && !gFetching && !gBusy) rfRespawn();
     });
+}
+// modules' views (rf.h)
+- (void)pushView:(View *)v {
+    [self leaveFileMode]; [self closeView]; setupMode = NO;
+    view = v; gSecure = v->secure;
+    gPlaceholder = v->placeholder ?: gPlaceholder;
+    field.stringValue = @"";
+    [self refresh];
+}
+- (void)closeView {
+    if (!view) return;
+    View *v = view; view = nil; gSecure = NO;
+    gPlaceholder = @"Search for apps and conversions…";
+    if (v->closed) v->closed();
 }
 - (void)windowDidResignKey:(NSNotification *)n { if (shown) [self hide]; }
 
@@ -1428,7 +1495,11 @@ static void drawView(NSView *v, CGContextRef c) {
         [self redraw];
         return;
     }
-    if (fileMode) {
+    if (view) {
+        NSArray<Cmd *> *cs = view->rows ? view->rows(trim(q)) : nil;
+        [out addObject:mkItem(K_HEADER, view->title ?: @"", nil, nil, nil)];
+        for (Cmd *c in cs) [out addObject:cmdItem(c)];
+    } else if (fileMode) {
         [self searchFiles:trim(q)];
         NSString *src = dig ? @"DigUp" : @"Spotlight";
         NSString *hdr = fileNote ?: !*lq ? src : searching && !fileRows.count ? @"Searching…" : fileRows.count ? src : @"No Files Found";
@@ -1449,10 +1520,14 @@ static void drawView(NSView *v, CGContextRef c) {
             int s = scoreMatch(a->lname, lq);
             if (s > 0) [scored addObject:@[@(s + MIN(a->uses, 30) * 12), a]];
         }
-        [scored sortUsingComparator:^NSComparisonResult(NSArray *x, NSArray *y) { return [y[0] compare:x[0]]; }];
+        NSMutableArray<Cmd *> *cmds = [NSMutableArray array];   // modules' rows rank among the apps
+        for (int i = 0; i < gModN; i++) if (gMods[i]->search) gMods[i]->search(trim(q), lq, cmds);
+        for (Cmd *cm in cmds) [scored addObject:@[@(cm->score), cm]];
+        [scored sortWithOptions:NSSortStable usingComparator:^NSComparisonResult(NSArray *x, NSArray *y) { return [y[0] compare:x[0]]; }];
         BOOL header = NO;
         for (NSUInteger i = 0; i < MIN((NSUInteger)MAXAPPS, scored.count); i++) {
             if (!header) { [out addObject:mkItem(K_HEADER, @"Results", nil, nil, nil)]; header = YES; }
+            if ([scored[i][1] isKindOfClass:Cmd.class]) { [out addObject:cmdItem(scored[i][1])]; continue; }
             App *a = scored[i][1];
             Item *it = mkItem(K_APP, a->name, nil, nil, nil); it->app = a;
             [out addObject:it];
@@ -1516,6 +1591,7 @@ static BOOL wantDigup(void) {
 }
 // Spotlight via /usr/bin/mdfind, out of process like curl: the Metadata framework never loads into rayfast.
 - (void)enterFileMode {
+    [self closeView];
     fileMode = YES; fileQuery = nil; fileRows = nil; fileNote = nil;
     dig = wantDigup();
     gPlaceholder = dig ? @"Describe what's in the file…" : @"Search files…";
@@ -1811,10 +1887,25 @@ static NSString *digupWhere(NSDictionary *h) {
         [NSPasteboard.generalPasteboard clearContents];
         [NSPasteboard.generalPasteboard setString:it->copy ?: it->title forType:NSPasteboardTypeString];
         [self hide]; break;
-    case K_ACTION: { SEL s = it->action; if (s) [self performSelector:s withObject:nil afterDelay:0]; break; }
+    case K_ACTION:
+        if (it->cmd) { if (it->cmd->run) it->cmd->run(NO); break; }
+        { SEL s = it->action; if (s) [self performSelector:s withObject:nil afterDelay:0]; break; }
     case K_FILE: { NSURL *u = [NSURL fileURLWithPath:it->app->path]; [self hide]; [NSWorkspace.sharedWorkspace openURL:u]; break; }
     default: break;
     }
+}
+// ⌘↩: a module row's second action, or Show in Finder for a file
+- (void)activateAlt {
+    Cmd *c = sel >= 0 && sel < (int)rows.count ? rows[sel]->cmd : nil;
+    if (!c) [self revealSelected];
+    else if (c->altVerb && c->run) c->run(YES);
+}
+// esc: out of the innermost thing first
+- (void)back {
+    if (setupMode) [self cancelSetup];
+    else if (view) { [self closeView]; [self refresh]; }
+    else if (fileMode) { [self leaveFileMode]; [self refresh]; }
+    else [self hide];
 }
 - (void)moveSel:(int)d {
     int n = (int)rows.count;
@@ -1829,8 +1920,10 @@ static NSString *digupWhere(NSDictionary *h) {
     [self redraw];
 }
 - (void)startRecording {
-    if (sel < 0 || sel >= (int)rows.count || rows[sel]->kind != K_APP) return;
+    NSString *target = sel >= 0 && sel < (int)rows.count ? bindTarget(rows[sel]) : nil;
+    if (!target) return;
     recording = rows[sel]->app;
+    if (!recording) { recording = [App new]; recording->name = rows[sel]->title; recording->path = target; }   // a module command
     Binding *b = [self bindingFor:recording->path];
     Item *it = mkCalc(recording->name, b ? [@"Current: " stringByAppendingString:comboString(b->key, b->mods, YES)] : @"No hotkey yet",
                       @"Press keys…", @"Use ⌘ ⌥ or ⌃ (or an F-key)", nil);
@@ -1860,13 +1953,31 @@ static NSString *digupWhere(NSDictionary *h) {
     recording = nil;
     [self refresh];
 }
+// a module row's own shortcut (Cmd->keys); the row's position stays selected across the uiRefresh() it triggers
+- (BOOL)rowKey:(UInt32)k mods:(UInt32)mods {
+    Cmd *c = sel >= 0 && sel < (int)rows.count ? rows[sel]->cmd : nil;
+    for (NSString *combo in c->keys) {
+        UInt32 ck, cm;
+        if (!parseCombo(combo, &ck, &cm) || ck != k || cm != mods) continue;
+        int was = sel;
+        c->keys[combo]();
+        if (was < (int)rows.count && rows[was]->kind != K_HEADER && sel != was) { sel = was; [self redraw]; }
+        else if (was >= (int)rows.count && sel >= 0 && rows.count > 1) { sel = (int)rows.count - 1; [self redraw]; }
+        return YES;
+    }
+    return NO;
+}
 - (BOOL)handleKey:(NSEvent *)e {
     if (recording) { [self finishRecording:e]; return YES; }
+    { NSEventModifierFlags f = e.modifierFlags;
+      UInt32 mods = (f & NSEventModifierFlagCommand ? cmdKey : 0) | (f & NSEventModifierFlagOption ? optionKey : 0) |
+                    (f & NSEventModifierFlagControl ? controlKey : 0) | (f & NSEventModifierFlagShift ? shiftKey : 0);
+      if ([self rowKey:e.keyCode mods:mods]) return YES; }
     NSEventModifierFlags m = e.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagOption | NSEventModifierFlagControl | NSEventModifierFlagShift);
     switch (e.keyCode) {
-    case 53: if (setupMode) [self cancelSetup]; else if (fileMode) { [self leaveFileMode]; [self refresh]; } else [self hide]; return YES;   // esc backs out first
-    case 36: case 76: if (m == NSEventModifierFlagCommand) [self revealSelected]; else [self activateSelected]; return YES;
-    case 51: if (fileMode && !m && !field.stringValue.length) { [self leaveFileMode]; [self refresh]; return YES; } break;
+    case 53: [self back]; return YES;   // esc backs out first
+    case 36: case 76: if (m == NSEventModifierFlagCommand) [self activateAlt]; else [self activateSelected]; return YES;
+    case 51: if ((fileMode || view) && !setupMode && !m && !field.stringValue.length) { [self back]; return YES; } break;
     case 48: if (fileMode && !m) { [self switchProvider]; return YES; } break;   // ⇥ switches file search provider
     case 125: [self moveSel:1]; return YES;
     case 126: [self moveSel:-1]; return YES;
@@ -1899,11 +2010,71 @@ void uiRun(void) {
     app.delegate = gR;
     __weak R *ws = gR;
     gRatesUpdated = ^{ R *s = ws; if (s && s->shown && !s->recording) [s refresh]; };
-    dispatch_async(dispatch_get_main_queue(), ^{ [gR makePanel]; [gR scanApps]; [gR preShow]; });
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [gR makePanel]; [gR scanApps]; [gR preShow];
+        for (int i = 0; i < gModN; i++) if (gMods[i]->start) gMods[i]->start();
+    });
     [app run];
 }
 void uiToggle(void) { [gR toggleLauncher]; }
+void uiShow(void) { if (gR && !gR->shown) [gR show]; }
 void uiSnapshot(void) { [gR snapshot]; }
+
+// modules (rf.h)
+int rfMatch(NSString *title, NSString *keywords, const char *lq) {
+    int s = scoreMatch(title.lowercaseString.UTF8String ?: "", lq);
+    if (!s && keywords && strlen(lq) >= 2 && strstr(keywords.lowercaseString.UTF8String ?: "", lq)) s = 200;
+    return MAX(s, 0);
+}
+static const RFModule *moduleNamed(NSString *name) {
+    for (int i = 0; i < gModN; i++) if ([name isEqual:@(gMods[i]->name)]) return gMods[i];
+    return NULL;
+}
+BOOL uiRunCommand(NSString *cid) {
+    const RFModule *m = moduleNamed([cid componentsSeparatedByString:@"."][0]);
+    return m && m->run && m->run(cid);
+}
+int uiCli(int argc, const char **argv) {   // rayfast --run <module> args…
+    const RFModule *m = moduleNamed(@(argv[2]));
+    if (!m || !m->cli) { fprintf(stderr, "rayfast: no module '%s' with a command-line entry\n", argv[2]); return 2; }
+    return m->cli(argc - 3, argv + 3);
+}
+NSPasteboard *rfPasteboard(void) { return getenv("RF_PASTEBOARD") ? [NSPasteboard pasteboardWithName:@(getenv("RF_PASTEBOARD"))] : NSPasteboard.generalPasteboard; }
+void uiHide(void) { [gR hide]; }
+void uiPush(View *v) { [gR pushView:v]; }
+void uiPop(void) { if (gR->view) { [gR closeView]; [gR refresh]; } }
+// Rows changed under the user (async results, a row acted): the selection stays where it was, never jumps to row 1,
+// so a second ↩ cannot land on a row they did not choose.
+void uiRefresh(void) {
+    if (!gR || !gR->shown || gR->recording) return;
+    int was = gR->sel; CGFloat off = gR->list->off;
+    [gR refresh];
+    if (was < 0 || !gR->rows.count) return;
+    int n = (int)gR->rows.count, i = MIN(was, n - 1);
+    while (i > 0 && gR->rows[i]->kind == K_HEADER) i--;
+    if (gR->rows[i]->kind == K_HEADER) return;
+    gR->sel = i; gR->list->off = off; [gR->list reveal]; [gR redraw];
+}
+void uiBusy(int delta) {
+    gBusy = MAX(0, gBusy + delta);
+    if (!gBusy && gR && !gR->shown) [gR scheduleRespawn];
+}
+void uiHideAndPaste(void) {
+    [gR hide];   // ordering the panel out hands keyboard focus back to the previous app
+    if (getenv("RF_NOHOTKEY") || getenv("RF_NOPASTE") || !AXIsProcessTrusted()) return;   // never from a test instance
+    uiBusy(1);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        CGEventSourceRef src = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
+        for (int down = 1; down >= 0; down--) {
+            CGEventRef e = CGEventCreateKeyboardEvent(src, 9, down);   // V
+            CGEventSetFlags(e, kCGEventFlagMaskCommand);
+            CGEventPost(kCGAnnotatedSessionEventTap, e);
+            CFRelease(e);
+        }
+        if (src) CFRelease(src);
+        uiBusy(-1);
+    });
+}
 void uiNoteOpen(NSString *path) {
     double now = CFAbsoluteTimeGetCurrent();
     NSMutableDictionary *u = [NSMutableDictionary dictionary];
