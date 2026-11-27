@@ -1,7 +1,8 @@
 # rayfast
 
-A tiny native macOS launcher: open apps, bind global hotkeys to apps, and quick conversions
-(math, units, currency, time zones). Raycast-style layout. Objective-C + AppKit, no Swift, no WebKit, no Node.
+A tiny native macOS launcher: open apps, bind global hotkeys to apps, quick conversions
+(math, units, currency, time zones), script commands, clipboard history, window management, snippets, quicklinks
+and system commands. Raycast-style layout. Objective-C + AppKit, no Swift, no WebKit, no Node.
 
 ```
 make            # build/rayfast.app
@@ -26,6 +27,22 @@ Conversions: `5 km to mi`, `72f`, `3 cups in ml`, `1 gib in mb`, `100 usd to inr
 `ist to cet` (now), `1500 utc to jst`, `10am ind to amsterdam`, `9am pst to utc-3:30`, `10am ist to cet tomorrow`.
 Time zones accept abbreviations (shown back as typed, switched to CEST/PDT etc. when daylight time applies), any
 country or zone city by name, and unique prefixes (`ams`, `sing`).
+### More
+
+Each of these is a module in its own file, and none of them costs anything until you use it. `⌘K` on any of their
+rows records a global hotkey for it.
+
+| | | |
+|---|---|---|
+| [Script commands](docs/scripts.md) | executables in `~/.config/rayfast/scripts`, in Raycast's Script Commands format | `scripts.m` |
+| [Clipboard history](docs/clipboard.md) | search what you copied, paste it back, pin, delete; text, links, files, images | `clip.m` |
+| [Window management](docs/windows.md) | `left half`, `max`, `next display`…: halves, quarters, thirds, restore | `win.m` |
+| [Snippets and quicklinks](docs/snippets.md) | text you paste often, and links with a `{query}`, in two plain files | `snip.m` |
+| [System commands](docs/system.md) | sleep, lock, volume, quit and kill, emoji, `uuid`, `base64`, `battery`… | `sys.m` |
+
+Pasting into the previous app and moving windows need Accessibility permission (System Settings → Privacy &
+Security → Accessibility). Without it, paste leaves the text on the clipboard and window commands explain what to grant.
+
 ### File search providers
 
 Set `files =` in the config, or press `⇥` in the file results (the choice is saved), or run the
@@ -62,6 +79,9 @@ ScreenCaptureKit benchmark (keypress → first frame where the panel has settled
 | open after idle (median) | 95 ms | 52 ms | **50 ms** |
 | rapid re-open (median) | 61 ms | 46 ms | 46–49 ms |
 | slowest open | 127 ms | 78 ms | **61 ms** |
+
+With every module above built in, rayfast still rests at ~10–11 MiB and its own part of an open is unchanged
+(the binary went from 221 KB to 447 KB).
 
 About 37 ms of every open is the window server (two 60 Hz frames from commit to scan-out) and ~3 ms is key
 delivery; rayfast's own work is ~3 ms of it.
