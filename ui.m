@@ -1510,6 +1510,21 @@ static void drawView(NSView *v, CGContextRef c) {
         NSArray *top = [apps sortedArrayUsingComparator:^NSComparisonResult(App *a, App *b) {
             return a->uses != b->uses ? (a->uses > b->uses ? NSOrderedAscending : NSOrderedDescending) : [a->name localizedCaseInsensitiveCompare:b->name];
         }];
+        // `launcher.pin = Clipboard History, Search Emoji` in the config: those commands, by title, above the apps.
+        // Each is found by asking the modules for its title, so nothing is kept between opens.
+        NSString *pins = rfSetting(@"launcher.pin", nil);
+        BOOL pinned = NO;
+        for (NSString *raw in pins.length ? [pins componentsSeparatedByString:@","] : @[]) {
+            NSString *t = trim(raw);
+            if (!t.length) continue;
+            NSMutableArray<Cmd *> *found = [NSMutableArray array];
+            for (int i = 0; i < gModN; i++) if (gMods[i]->search) gMods[i]->search(t, t.lowercaseString.UTF8String, found);
+            for (Cmd *cm in found) if (cm->title && [cm->title caseInsensitiveCompare:t] == NSOrderedSame) {
+                if (!pinned) { [out addObject:mkItem(K_HEADER, @"Pinned", nil, nil, nil)]; pinned = YES; }
+                [out addObject:cmdItem(cm)];
+                break;
+            }
+        }
         [out addObject:mkItem(K_HEADER, @"Suggestions", nil, nil, nil)];
         for (NSUInteger i = 0; i < MIN(8u, top.count); i++) { Item *it = mkItem(K_APP, ((App *)top[i])->name, nil, nil, nil); it->app = top[i]; [out addObject:it]; }
     } else {

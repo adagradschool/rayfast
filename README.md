@@ -40,6 +40,9 @@ rows records a global hotkey for it.
 | [Snippets and quicklinks](docs/snippets.md) | text you paste often, and links with a `{query}`, in two plain files | `snip.m` |
 | [System commands](docs/system.md) | sleep, lock, volume, quit and kill, emoji, `uuid`, `base64`, `battery`… | `sys.m` |
 
+`launcher.pin = Clipboard History, Search Emoji` in the config puts those commands, by title, above the suggested apps
+when the launcher opens, so the first one is a `↩` away.
+
 Pasting into the previous app and moving windows need Accessibility permission (System Settings → Privacy &
 Security → Accessibility). Without it, paste leaves the text on the clipboard and window commands explain what to grant.
 
