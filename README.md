@@ -1,7 +1,8 @@
 # rayfast
 
-A tiny native macOS launcher: open apps, bind global hotkeys to apps, and quick conversions
-(math, units, currency, time zones). Raycast-style layout. Objective-C + AppKit, no Swift, no WebKit, no Node.
+A tiny native macOS launcher: open apps, bind global hotkeys to apps, quick conversions
+(math, units, currency, time zones), script commands, clipboard history, window management, snippets, quicklinks
+and system commands. Raycast-style layout. Objective-C + AppKit, no Swift, no WebKit, no Node.
 
 ```
 make            # build/rayfast.app
@@ -26,6 +27,25 @@ Conversions: `5 km to mi`, `72f`, `3 cups in ml`, `1 gib in mb`, `100 usd to inr
 `ist to cet` (now), `1500 utc to jst`, `10am ind to amsterdam`, `9am pst to utc-3:30`, `10am ist to cet tomorrow`.
 Time zones accept abbreviations (shown back as typed, switched to CEST/PDT etc. when daylight time applies), any
 country or zone city by name, and unique prefixes (`ams`, `sing`).
+### More
+
+Each of these is a module in its own file, and none of them costs anything until you use it. `⌘K` on any of their
+rows records a global hotkey for it.
+
+| | | |
+|---|---|---|
+| [Script commands](docs/scripts.md) | executables in `~/.config/rayfast/scripts`, in Raycast's Script Commands format | `scripts.m` |
+| [Clipboard history](docs/clipboard.md) | search what you copied, paste it back, pin, delete; text, links, files, images | `clip.m` |
+| [Window management](docs/windows.md) | `left half`, `max`, `next display`…: halves, quarters, thirds, restore | `win.m` |
+| [Snippets and quicklinks](docs/snippets.md) | text you paste often, and links with a `{query}`, in two plain files | `snip.m` |
+| [System commands](docs/system.md) | sleep, lock, volume, quit and kill, emoji, `uuid`, `base64`, `battery`… | `sys.m` |
+
+`launcher.pin = Clipboard History, Search Emoji` in the config puts those commands, by title, above the suggested apps
+when the launcher opens, so the first one is a `↩` away.
+
+Pasting into the previous app and moving windows need Accessibility permission (System Settings → Privacy &
+Security → Accessibility). Without it, paste leaves the text on the clipboard and window commands explain what to grant.
+
 ### File search providers
 
 Set `files =` in the config, or press `⇥` in the file results (the choice is saved), or run the
@@ -63,6 +83,9 @@ ScreenCaptureKit benchmark (keypress → first frame where the panel has settled
 | rapid re-open (median) | 61 ms | 46 ms | 46–49 ms |
 | slowest open | 127 ms | 78 ms | **61 ms** |
 
+With every module above built in, rayfast still rests at ~10–11 MiB and its own part of an open is unchanged
+(the binary went from 221 KB to 447 KB).
+
 About 37 ms of every open is the window server (two 60 Hz frames from commit to scan-out) and ~3 ms is key
 delivery; rayfast's own work is ~3 ms of it.
 
@@ -91,6 +114,11 @@ delivery; rayfast's own work is ~3 ms of it.
 Code: `core.m` (config, hotkeys, launching, respawn, `main`), `ui.m` (window, renderer, search, conversions),
 `rf.h` (the interface between them).
 
+**Modules.** A feature can live in its own `.m` file (the Makefile builds every `*.m`): it registers an `RFModule`
+with `RF_MODULE` and hands the launcher rows (`Cmd`) for a root query, or a whole `View` of its own, without touching
+`ui.m`. A row with an id can be bound to a global hotkey with `⌘K` (`ctrl+opt+left = cmd:window.left-half` in the
+config), and `<module>.<name> = value` config lines are that module's settings. The interface is in `rf.h`.
+
 ## Testing hooks
 
 `kill -USR1 <pid>` toggles the launcher. Environment variables: `RF_CONFIG_DIR` (another config dir),
@@ -98,7 +126,10 @@ Code: `core.m` (config, hotkeys, launching, respawn, `main`), `ui.m` (window, re
 DigUp's own; a missing path acts as "not installed"), `RF_DIGUP_DEST` and `RF_DIGUP_NOOPEN=1` (where the installer puts
 DigUp, and not opening it), `RF_NOHOTKEY=1` (register no hotkeys) with `RF_TOGGLE=hyper+9` (a private toggle), `RF_DEBUG=1` (log hotkey→commit
 latency to stderr), `RF_SNAP=/path/x` (`kill -USR2` renders the window with the query in `/path/x.q` to
-`/path/x.png`; `query|down|enter|cmdk|nopng` steps through it, and `@same` re-renders the current state). `rayfast --eval "5 km to mi"` runs the conversion engine from the command line.
+`/path/x.png` and, as text, to `/path/x.txt`; `query|down|up|enter|cmdenter|esc|cmdk|q=more|cmd=<cid>|key=<combo>|nopng` steps through it (`cmd=` runs a module command as its hotkey would, `key=cmd+shift+p` presses one of the selected row's `Cmd->keys`), and
+`@same` re-renders the current state), `RF_HEADLESS=1` (everything but the window: nothing appears on screen and focus
+stays where it is), `RF_DATA_DIR` (another folder for modules' state). `rayfast --run <module> args…` calls a module's
+command-line entry. `rayfast --eval "5 km to mi"` runs the conversion engine from the command line.
 
 `make test-app` builds a separately named copy (`rayfast-test`) so tests never touch the running instance.
 `tests/lat.sh` measures resting memory and in-process latency, `tests/active.sh` the open window.

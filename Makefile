@@ -1,14 +1,15 @@
 APP  := build/rayfast.app
 BIN  := $(APP)/Contents/MacOS/rayfast
 OPT  := -fobjc-arc -Os -Wall -Wno-deprecated-declarations -mmacosx-version-min=13.0
+SRC  := $(wildcard *.m)
 LIBS := -framework Cocoa -framework Carbon -framework QuartzCore -framework IOSurface
 
 all: $(BIN)
 
-$(BIN): core.m ui.m rf.h Info.plist
+$(BIN): $(SRC) rf.h Info.plist
 	@mkdir -p $(APP)/Contents/MacOS
 	cp Info.plist $(APP)/Contents/Info.plist
-	clang $(OPT) core.m ui.m -o $@ $(LIBS) -Wl,-dead_strip
+	clang $(OPT) $(SRC) -o $@ $(LIBS) -Wl,-dead_strip
 	strip -x $@
 	codesign -s - -f $(APP) 2>/dev/null || true
 
@@ -29,13 +30,15 @@ uninstall:
 	rm -rf ~/Applications/rayfast.app
 
 # a separately named copy for experiments, so tests never touch the real running instance
-TEST := build/rayfast-test.app
+# (make test-app TESTNAME=rayfast-test-foo gives parallel test runs their own process name)
+TESTNAME ?= rayfast-test
+TEST := build/$(TESTNAME).app
 test-app: all
 	rm -rf $(TEST) && cp -R $(APP) $(TEST)
-	mv $(TEST)/Contents/MacOS/rayfast $(TEST)/Contents/MacOS/rayfast-test
-	plutil -replace CFBundleExecutable -string rayfast-test $(TEST)/Contents/Info.plist
-	plutil -replace CFBundleIdentifier -string local.rayfast.test $(TEST)/Contents/Info.plist
-	plutil -replace CFBundleName -string rayfast-test $(TEST)/Contents/Info.plist
+	mv $(TEST)/Contents/MacOS/rayfast $(TEST)/Contents/MacOS/$(TESTNAME)
+	plutil -replace CFBundleExecutable -string $(TESTNAME) $(TEST)/Contents/Info.plist
+	plutil -replace CFBundleIdentifier -string local.$(subst -,.,$(TESTNAME)) $(TEST)/Contents/Info.plist
+	plutil -replace CFBundleName -string $(TESTNAME) $(TEST)/Contents/Info.plist
 	codesign -s - -f $(TEST) 2>/dev/null || true
 
 clean:

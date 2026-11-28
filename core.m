@@ -10,6 +10,11 @@ NSString *cfgDir(void) { return getenv("RF_CONFIG_DIR") ? @(getenv("RF_CONFIG_DI
 NSString *cfgPath(void) { return [cfgDir() stringByAppendingPathComponent:@"config"]; }
 NSString *trim(NSString *s) { return [s stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet]; }
 time_t mtimeOf(NSString *p) { struct stat st; return stat(p.fileSystemRepresentation, &st) ? 0 : st.st_mtime; }
+NSString *rfDataDir(void) {
+    NSString *d = getenv("RF_DATA_DIR") ? @(getenv("RF_DATA_DIR")) : [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/rayfast"];
+    [NSFileManager.defaultManager createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
+    return d;
+}
 
 #pragma mark - hotkeys
 
@@ -71,6 +76,7 @@ NSString *comboString(UInt32 key, UInt32 mods, BOOL pretty) {
 NSMutableArray<Binding *> *gBinds;
 Binding *gToggle;
 NSString *gFiles = @"auto";
+static NSMutableDictionary<NSString *, NSString *> *gSettings;   // module settings: "<module>.<name> = value" config lines
 static UInt32 gNextHid;
 static time_t gCfgMtime;
 
@@ -93,6 +99,8 @@ void rfSaveConfig(void) {
     [s appendFormat:@"# Search Files provider: auto (DigUp when it's installed, else Spotlight), spotlight, or digup.\n"
                     @"# ⇥ in the file results switches between them and saves the choice here.\n"
                     @"files = %@\n\n", gFiles];
+    for (NSString *k in [gSettings.allKeys sortedArrayUsingSelector:@selector(compare:)]) [s appendFormat:@"%@ = %@\n", k, gSettings[k]];
+    if (gSettings.count) [s appendString:@"\n"];
     for (Binding *b in gBinds) [s appendFormat:@"%@ = %@\n", comboString(b->key, b->mods, NO), b->path];
     [s writeToFile:cfgPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
     gCfgMtime = mtimeOf(cfgPath());
@@ -104,6 +112,7 @@ static void loadConfig(void) {
     gToggle = [Binding new];
     parseCombo(@"cmd+space", &gToggle->key, &gToggle->mods);
     gFiles = @"auto";
+    gSettings = [NSMutableDictionary dictionary];
     NSString *txt = [NSString stringWithContentsOfFile:cfgPath() encoding:NSUTF8StringEncoding error:nil];
     if (!txt) { rfSaveConfig(); txt = @""; }
     for (NSString *line in [txt componentsSeparatedByString:@"\n"]) {
@@ -116,7 +125,11 @@ static void loadConfig(void) {
         if ([k isEqual:@"mode"]) continue;   // older configs: there is only one mode now
         if ([k isEqual:@"files"]) { NSString *f = v.lowercaseString; if ([@[@"auto", @"spotlight", @"digup"] containsObject:f]) gFiles = f; continue; }
         Binding *b = [Binding new];
-        if (!parseCombo(k, &b->key, &b->mods)) { NSLog(@"rayfast: bad hotkey '%@'", k); continue; }
+        if (!parseCombo(k, &b->key, &b->mods)) {
+            if ([k containsString:@"."] && ![k containsString:@"+"] && k.length > 2) gSettings[k] = v;   // a module's setting
+            else NSLog(@"rayfast: bad hotkey '%@'", k);
+            continue;
+        }
         b->path = [v stringByExpandingTildeInPath];
         [gBinds addObject:b];
     }
@@ -124,6 +137,12 @@ static void loadConfig(void) {
     rfRegister(gToggle);
     for (Binding *b in gBinds) rfRegister(b);
     gCfgMtime = mtimeOf(cfgPath());
+}
+NSString *rfSetting(NSString *key, NSString *def) { return gSettings[key] ?: def; }
+void rfSetSetting(NSString *key, NSString *value) {
+    if (!gSettings) gSettings = [NSMutableDictionary dictionary];
+    gSettings[key] = value;   // nil removes
+    rfSaveConfig();
 }
 void rfReloadConfigIfChanged(void) { if (mtimeOf(cfgPath()) != gCfgMtime) loadConfig(); }
 
@@ -159,7 +178,11 @@ static OSStatus hotkeyHandler(EventHandlerCallRef c, EventRef e, void *u) {
     EventHotKeyID hid;
     GetEventParameter(e, kEventParamDirectObject, typeEventHotKeyID, NULL, sizeof hid, NULL, &hid);
     if (hid.id == gToggle->hid) { gHotkeyAt = mach_absolute_time(); uiToggle(); return noErr; }
-    for (Binding *b in gBinds) if (b->hid == hid.id) { rfOpenApp(b->path, YES); break; }
+    for (Binding *b in gBinds) if (b->hid == hid.id) {
+        if ([b->path hasPrefix:@"cmd:"]) uiRunCommand([b->path substringFromIndex:4]);   // a module command (see rf.h)
+        else rfOpenApp(b->path, YES);
+        break;
+    }
     return noErr;
 }
 
@@ -169,6 +192,7 @@ int main(int argc, const char **argv) {
     if (!getenv("MallocSpaceEfficient") && argc == 1) { setenv("MallocSpaceEfficient", "1", 1); rfRespawn(); }
     @autoreleasepool {
         if (argc > 2 && !strcmp(argv[1], "--eval")) return uiEval(argc, argv);   // rayfast --eval "5 km to mi"
+        if (argc > 2 && !strcmp(argv[1], "--run")) return uiCli(argc, argv);     // rayfast --run <module> args…
         sigset_t none; sigemptyset(&none); sigprocmask(SIG_SETMASK, &none, NULL);   // the signal mask survives execv()
         EventTypeSpec spec = {kEventClassKeyboard, kEventHotKeyPressed};
         InstallApplicationEventHandler(&hotkeyHandler, 1, &spec, NULL, NULL);
